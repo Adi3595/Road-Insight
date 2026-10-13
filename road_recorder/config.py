@@ -27,7 +27,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "diagnostics_directory": "diagnostics",
         "require_verified_usb": True,
         "allow_fallback_to_sd": False,
-        "volume_uuid": "",
+        "volume_uuid": "70AA-2D80",
         "low_space_warning_percent": 15,
         "critical_free_space_mb": 1024,
     },
@@ -35,6 +35,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "segment_duration_seconds": 300,
         "container_format": "mp4",
         "auto_start": False,
+    },
+    "api": {
+        "host": "0.0.0.0",
+        "port": 8000,
+        "api_key_env_var": "ROAD_RECORDER_API_KEY",
+        "api_key_file": "/mnt/road-recorder-usb/.road-recorder-api.key",
+        "max_duration_seconds": 3600,
+        "cors_origins": ["*"],
     },
     "logging": {
         "level": "INFO",
@@ -137,6 +145,16 @@ class AppConfig:
         auto_start = self.recording.get("auto_start", self.recording.get("auto_start_on_launch", False))
         self.auto_start = bool(auto_start)
 
+        # API settings
+        self.api = raw.get("api", {})
+        self.api_host = str(self.api.get("host", "0.0.0.0"))
+        self.api_port = int(self.api.get("port", 8000))
+        self.api_key_env_var = str(self.api.get("api_key_env_var", "ROAD_RECORDER_API_KEY"))
+        raw_key_file = str(self.api.get("api_key_file", "/mnt/road-recorder-usb/.road-recorder-api.key"))
+        self.api_key_file = Path(os.path.expanduser(raw_key_file)).resolve()
+        self.max_duration_seconds = int(self.api.get("max_duration_seconds", 3600))
+        self.cors_origins = list(self.api.get("cors_origins", ["*"]))
+
         # Logging settings
         self.log_level = str(self.logging.get("level", "INFO")).upper()
 
@@ -156,6 +174,9 @@ class AppConfig:
 
         if self.segment_duration_seconds < 5:
             raise ValueError(f"Segment duration {self.segment_duration_seconds}s is too short (minimum 5s).")
+
+        if self.max_duration_seconds < 5:
+            raise ValueError(f"max_duration_seconds {self.max_duration_seconds}s is too short (minimum 5s).")
 
         if self.critical_free_space_mb <= 0:
             raise ValueError("Critical storage threshold must be greater than 0 MB.")

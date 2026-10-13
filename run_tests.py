@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Zero-dependency test runner using Python standard library unittest.
+Test runner for Road Recorder.
 Discovers and runs test cases across the tests/ directory.
+Includes core recorder tests and FastAPI integration tests.
 """
 
 import sys
@@ -14,13 +15,9 @@ sys.path.insert(0, str(ROOT_DIR))
 
 
 def run_all_tests():
-    loader = unittest.TestLoader()
-    suite = unittest.TestSuite()
-
-    # Import test modules
+    # Import core test modules
     from tests import test_config, test_storage_manager, test_segment_manager, test_recording_index, test_recorder_lifecycle
 
-    # Convert pytest test functions into unittest cases if needed, or run unittest TestCase
     test_modules = [
         test_config,
         test_storage_manager,
@@ -29,13 +26,20 @@ def run_all_tests():
         test_recorder_lifecycle
     ]
 
+    # Try importing API test module if FastAPI is available
+    try:
+        from tests import test_api
+        test_modules.append(test_api)
+    except ImportError as e:
+        print(f"[NOTICE] FastAPI test suite skipped (dependencies not present in current python env: {e})")
+
     total_passed = 0
     total_failed = 0
     errors = []
 
-    print("=" * 65)
-    print("        ROAD RECORDER - AUTOMATED UNIT TEST SUITE")
-    print("=" * 65)
+    print("=" * 68)
+    print("        ROAD RECORDER - AUTOMATED COMPREHENSIVE TEST SUITE")
+    print("=" * 68)
 
     for mod in test_modules:
         mod_name = mod.__name__
@@ -43,12 +47,10 @@ def run_all_tests():
         for attr_name in dir(mod):
             if attr_name.startswith("test_") and callable(getattr(mod, attr_name)):
                 func = getattr(mod, attr_name)
-                # Check arguments
                 try:
                     import tempfile
                     with tempfile.TemporaryDirectory() as tmp_dir:
                         tmp_path = Path(tmp_dir)
-                        # Check func signature
                         import inspect
                         sig = inspect.signature(func)
                         kwargs = {}
@@ -66,9 +68,9 @@ def run_all_tests():
                     total_failed += 1
                     errors.append((mod_name, attr_name, str(e)))
 
-    print("\n" + "=" * 65)
+    print("\n" + "=" * 68)
     print(f"TEST SUMMARY: {total_passed} Passed, {total_failed} Failed")
-    print("=" * 65)
+    print("=" * 68)
 
     if total_failed > 0:
         print("\nFailures:")
@@ -76,7 +78,7 @@ def run_all_tests():
             print(f" - {m}.{a}: {err}")
         sys.exit(1)
     else:
-        print("ALL AUTOMATED UNIT TESTS PASSED SUCCESSFULLY!")
+        print("ALL AUTOMATED TESTS PASSED SUCCESSFULLY!")
         sys.exit(0)
 
 

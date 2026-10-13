@@ -1,5 +1,6 @@
 # Road Recorder Configuration
 # Production settings for Raspberry Pi 4 Model B continuous dashcam recording
+# Road Inspection Industry Project (PMC Pune Demonstration)
 
 camera:
   # Capture backend: 'auto', 'rpicam-vid', 'libcamera-vid', 'picamera2', or 'mock' (testing)
@@ -27,8 +28,8 @@ storage:
   # Strictly disallow fallback to microSD card
   allow_fallback_to_sd: false
   
-  # Specific volume UUID to verify (optional; leave empty to verify USB bus & marker)
-  volume_uuid: ""
+  # Expected USB volume UUID for PMC Pune Road Recorder pendrive
+  volume_uuid: "70AA-2D80"
   
   # Storage capacity safeguards
   low_space_warning_percent: 15
@@ -39,5 +40,19 @@ recording:
   segment_duration_seconds: 300
   # Output container format: 'mp4' or 'h264'
   container_format: "mp4"
-  # Automatically start recording when application is launched
+  # Automatically start recording when application is launched (keep false)
   auto_start: false
+
+api:
+  # API server host and port
+  host: "0.0.0.0"
+  port: 8000
+  # Environment variable name holding the master API Key
+  api_key_env_var: "ROAD_RECORDER_API_KEY"
+  # Secure path to persistent API key file stored on the verified USB drive
+  api_key_file: "/mnt/road-recorder-usb/.road-recorder-api.key"
+  # Maximum allowable recording duration for a single requested session (seconds)
+  max_duration_seconds: 3600
+  # Enable CORS for frontend consumers
+  cors_origins:
+    - "*"

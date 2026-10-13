@@ -1,0 +1,48 @@
+[Unit]
+Description=Road Recorder Video Data API Server
+Documentation=https://github.com/Adi3595/Road-Insight
+After=network.target local-fs.target
+# Only start if USB drive mount point exists
+ConditionPathIsMountPoint=/mnt/road-recorder-usb
+# Only start if the volume marker file exists
+ConditionPathExists=/mnt/road-recorder-usb/.road-recorder-volume
+
+[Service]
+Type=simple
+User=omgawale
+Group=omgawale
+WorkingDirectory=/mnt/road-recorder-usb/road-recorder/Road-Recorder
+EnvironmentFile=-/mnt/road-recorder-usb/road-recorder/Road-Recorder/.env
+
+# Pre-flight USB gate check — verifies UUID and read/write capability
+ExecStartPre=/usr/bin/python3 -m road_recorder.usb_gate
+
+# Start the FastAPI server via Uvicorn
+ExecStart=/usr/bin/python3 api_server.py
+
+# Graceful shutdown
+ExecStop=/bin/kill -SIGINT $MAINPID
+TimeoutStopSec=15
+KillSignal=SIGINT
+FinalKillSignal=SIGKILL
+
+# Restart policy: restart on failure, but not on clean exit
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/mnt/road-recorder-usb
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=road-recorder-api
+
+[Install]
+WantedBy=multi-user.target

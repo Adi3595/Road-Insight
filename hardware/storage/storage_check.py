@@ -72,10 +72,62 @@ def get_mount_info_for_path(target_path: Path) -> Dict[str, Any]:
                     info["is_microsd"] = True
                 elif dev_str.startswith("/dev/sd") or "/dev/disk/by-" in dev_str:
                     info["is_usb"] = True
+                
+                info["uuid"] = get_device_uuid(dev_str, active["mount_point"])
         except Exception:
             pass
 
     return info
+
+
+def get_device_uuid(device_path: Optional[str] = None, mount_point: Optional[str] = None) -> Optional[str]:
+    """Retrieve filesystem UUID safely via findmnt, lsblk, or blkid."""
+    if mount_point and shutil.which("findmnt"):
+        try:
+            res = subprocess.run(
+                ["findmnt", "-n", "-o", "UUID", mount_point],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=2
+            )
+            val = res.stdout.strip()
+            if val:
+                return val
+        except Exception:
+            pass
+
+    if device_path and shutil.which("lsblk"):
+        try:
+            res = subprocess.run(
+                ["lsblk", "-no", "UUID", device_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=2
+            )
+            val = res.stdout.strip()
+            if val:
+                return val
+        except Exception:
+            pass
+
+    if device_path and shutil.which("blkid"):
+        try:
+            res = subprocess.run(
+                ["blkid", "-s", "UUID", "-o", "value", device_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=2
+            )
+            val = res.stdout.strip()
+            if val:
+                return val
+        except Exception:
+            pass
+
+    return None
 
 
 def list_detailed_block_devices() -> List[Dict[str, Any]]:
@@ -287,6 +339,15 @@ def verify_usb_mount_safety(
             reasons_blocked.append(
                 f"Volume marker ({VOLUME_MARKER_FILENAME}) is missing or invalid on '{mount_path}'."
             )
+
+        # Check 5: Expected UUID matching
+        if expected_uuid:
+            dev_uuid = mount_info.get("uuid") or get_device_uuid(mount_info.get("device"), str(mount_path))
+            mount_info["uuid"] = dev_uuid
+            if not dev_uuid or (dev_uuid.strip().upper() != expected_uuid.strip().upper()):
+                reasons_blocked.append(
+                    f"Mounted volume UUID '{dev_uuid or 'UNKNOWN'}' does not match required USB volume UUID '{expected_uuid}'."
+                )
 
     if not rw_ok:
         reasons_blocked.append(f"Storage write verification failed: {rw_msg}")
