@@ -1,0 +1,5 @@
+# Road Recorder Python Dependencies
+# Core recorder runs with Python 3 standard library, but pyyaml is recommended.
+
+pyyaml>=6.0.1
+pytest>=7.4.0

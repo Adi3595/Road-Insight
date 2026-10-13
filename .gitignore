@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pytest_cache/
+.pytest_cache/
+
+# Local logs and temporary diagnostics
+logs/
+road-recorder-data/
+*.log
+*.tmp
+*.part.*
+.road_recorder.lock
+environment_report.json
+
+# Local recordings (never commit large video files)
+recordings/
+*.h264
+*.mp4
+*.mkv
+
+# Virtual environment
+.venv/
+venv/
+env/

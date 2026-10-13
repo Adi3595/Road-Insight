@@ -1,0 +1,43 @@
+# Road Recorder Configuration
+# Production settings for Raspberry Pi 4 Model B continuous dashcam recording
+
+camera:
+  # Capture backend: 'auto', 'rpicam-vid', 'libcamera-vid', 'picamera2', or 'mock' (testing)
+  backend: "auto"
+  width: 1280
+  height: 720
+  fps: 30
+  codec: "h264"
+  # Target bitrate in bits per second (5000000 = ~5 Mbps)
+  bitrate: 5000000
+  # Show preview window on attached display (set to false for headless recording)
+  preview: false
+
+storage:
+  # Primary mount path for the dedicated USB pendrive
+  mount_path: "/mnt/road-recorder-usb"
+  recordings_directory: "recordings"
+  metadata_directory: "metadata"
+  logs_directory: "logs"
+  diagnostics_directory: "diagnostics"
+  
+  # Strictly require verified USB mount before allowing recording
+  require_verified_usb: true
+  
+  # Strictly disallow fallback to microSD card
+  allow_fallback_to_sd: false
+  
+  # Specific volume UUID to verify (optional; leave empty to verify USB bus & marker)
+  volume_uuid: ""
+  
+  # Storage capacity safeguards
+  low_space_warning_percent: 15
+  critical_free_space_mb: 1024
+
+recording:
+  # Duration of each video segment in seconds (default: 300s / 5 minutes)
+  segment_duration_seconds: 300
+  # Output container format: 'mp4' or 'h264'
+  container_format: "mp4"
+  # Automatically start recording when application is launched
+  auto_start: false
