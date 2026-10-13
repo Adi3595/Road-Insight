@@ -24,3 +24,8 @@ recordings/
 .venv/
 venv/
 env/
+
+# Secrets — NEVER commit these
+.env
+*.key
+.road-recorder-api.key
