@@ -215,149 +215,595 @@ Press `Ctrl+C` at any time. The application will:
 
 ---
 
-## 6. Video Data API Server
+## 6. Video Data API — Quick Start
 
-### Starting the API Server
+### 6.1 Start the API Server (on Raspberry Pi)
 ```bash
 python3 api_server.py
 ```
+Server runs at `http://0.0.0.0:8000`. Open `http://<raspberry-pi-ip>:8000/docs` in any browser for interactive Swagger UI.
 
-The server starts on `http://0.0.0.0:8000` with interactive Swagger docs at `/docs`.
+### 6.2 Get Your API Key
 
-### API Key Setup
-
-Generate a cryptographically random API key:
 ```bash
+# Generate a new key
 python3 -m road_recorder.api.keygen --generate
-```
 
-The key is stored securely on the USB drive at `/mnt/road-recorder-usb/.road-recorder-api.key`.  
-Alternatively, set it via environment variable:
-```bash
-export ROAD_RECORDER_API_KEY="your-secret-key-here"
-```
-
-### API Key Rotation
-```bash
-# Generate a new key (invalidates the old one immediately)
-python3 -m road_recorder.api.keygen --rotate
-
-# View the current active key
+# View your current key
 python3 -m road_recorder.api.keygen --show
+
+# Rotate (replace) the key
+python3 -m road_recorder.api.keygen --rotate
 ```
 
-### API Endpoints Reference
+Or set it in `.env`:
+```bash
+export ROAD_RECORDER_API_KEY="nZlURqvn-hxzgp4gfgaFHfkNvAzzxDxjIQ_o4vu-HFWcDi5-Sr1edJP4BVJexDpn"
+```
 
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| `GET` | `/api/v1/health` | ✗ | Health check (storage readiness) |
-| `GET` | `/api/v1/device/status` | ✓ | Full device telemetry (camera, storage, recording) |
-| `POST` | `/api/v1/recordings/start` | ✓ | Start recording session (optional `duration_seconds`) |
-| `POST` | `/api/v1/recordings/stop` | ✓ | Stop active recording session |
-| `GET` | `/api/v1/recordings/{session_id}` | ✓ | Get session status |
-| `GET` | `/api/v1/recordings` | ✓ | Paginated recording list (`page`, `per_page`, `date`) |
-| `GET` | `/api/v1/recordings/{id}/video` | ✓ | Download MP4 (supports HTTP Range 206) |
-| `GET` | `/api/v1/recordings/{id}/metadata` | ✓ | Get recording metadata |
-| `GET` | `/api/v1/stream/status` | ✓ | Live stream status & hardware analysis |
-| `POST` | `/api/v1/stream/start` | ✓ | Start live stream session |
-| `POST` | `/api/v1/stream/stop` | ✓ | Stop live stream session |
+### 6.3 Authentication
 
-### Swagger UI
+All authenticated endpoints require the `X-API-Key` header:
+```
+X-API-Key: YOUR_SECRET_KEY_HERE
+```
 
-Open `http://<raspberry-pi-ip>:8000/docs` in a browser for interactive API testing with the "Authorize" button.
+> [!TIP]
+> Replace `192.168.1.100` with your Raspberry Pi's actual IP address in all examples below.
+> Find it by running `hostname -I` on the Pi.
 
 ---
 
-## 7. Remote Consumer Workflow
+## 7. API Endpoints — Complete Reference with Examples
 
-### Workflow 1: Record & Download (Recommended Production Pathway)
+> [!NOTE]
+> Every example below is **copy-paste ready**. Just replace `YOUR_API_KEY` and `192.168.1.100` with your actual values.
 
-```
-Consumer                        Raspberry Pi API
-   │                                   │
-   ├── GET /health ──────────────────► │  Check device readiness
-   │◄─────────── {"healthy"} ──────────┤
-   │                                   │
-   ├── POST /recordings/start ───────► │  Request 60s recording
-   │   {"duration_seconds": 60}        │
-   │◄─── {"session_id": "session_..."} ┤
-   │                                   │
-   ├── GET /recordings/{session} ────► │  Poll until "completed"
-   │◄────── {"status": "recording"} ───┤
-   │  ...                              │
-   │◄────── {"status": "completed"} ───┤
-   │                                   │
-   ├── GET /recordings ──────────────► │  List available MP4s
-   │◄────── {"items": [...]} ──────────┤
-   │                                   │
-   ├── GET /recordings/{id}/video ───► │  Download with Range support
-   │◄───────── chunked MP4 stream ─────┤
-   │                                   │
-   └── Verify MP4                      │
-```
+### 📋 Endpoints At A Glance
 
-### Python Consumer Client
+| # | Method | Endpoint | Auth | What It Does |
+|---|--------|----------|:----:|--------------|
+| 1 | `GET` | `/api/v1/health` | ✗ | Is the device ready? |
+| 2 | `GET` | `/api/v1/device/status` | ✓ | Full device info (camera, storage, state) |
+| 3 | `POST` | `/api/v1/recordings/start` | ✓ | Start recording video |
+| 4 | `POST` | `/api/v1/recordings/stop` | ✓ | Stop recording video |
+| 5 | `GET` | `/api/v1/recordings/{session_id}` | ✓ | Check recording session progress |
+| 6 | `GET` | `/api/v1/recordings` | ✓ | List all saved recordings |
+| 7 | `GET` | `/api/v1/recordings/{id}/video` | ✓ | Download MP4 video file |
+| 8 | `GET` | `/api/v1/recordings/{id}/metadata` | ✓ | Get recording details (duration, size, etc.) |
+| 9 | `GET` | `/api/v1/stream/status` | ✓ | Live stream hardware status |
+| 10 | `POST` | `/api/v1/stream/start` | ✓ | Start live stream session |
+| 11 | `POST` | `/api/v1/stream/stop` | ✓ | Stop live stream session |
+
+---
+
+### ① Health Check — `GET /api/v1/health`
+
+**No API key needed.** Use this to check if the Raspberry Pi and USB storage are ready.
+
+**cURL:**
 ```bash
-# Full workflow: health → record 30s → poll → download → verify
-python3 examples/client_consumer.py --host 192.168.1.100 --api-key YOUR_KEY --duration 30
-
-# Health check only
-python3 examples/client_consumer.py --host 192.168.1.100 --api-key YOUR_KEY --health-only
-
-# List existing recordings
-python3 examples/client_consumer.py --host 192.168.1.100 --api-key YOUR_KEY --list-only
+curl http://192.168.1.100:8000/api/v1/health
 ```
 
-### Windows PowerShell Quick Test
+**PowerShell:**
+```powershell
+Invoke-RestMethod http://192.168.1.100:8000/api/v1/health
+```
+
+**Response (200 OK):**
+```json
+{
+  "status": "healthy",
+  "usb_mounted": true,
+  "storage_ok": true,
+  "camera_available": true
+}
+```
+
+**Response (503 — USB not mounted):**
+```json
+{
+  "detail": {
+    "status": "degraded",
+    "message": "USB recording drive not available."
+  }
+}
+```
+
+---
+
+### ② Device Status — `GET /api/v1/device/status`
+
+Get full telemetry: camera sensor, storage free space, current recording state.
+
+**cURL:**
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" \
+  http://192.168.1.100:8000/api/v1/device/status
+```
+
+**PowerShell:**
 ```powershell
 $headers = @{ "X-API-Key" = "YOUR_API_KEY" }
-$base = "http://192.168.1.100:8000"
+Invoke-RestMethod http://192.168.1.100:8000/api/v1/device/status -Headers $headers
+```
 
-# Health check
+**Response (200 OK):**
+```json
+{
+  "api_version": "1.0.0",
+  "device": "Raspberry Pi 4 Model B",
+  "camera": {
+    "sensor": "IMX219",
+    "resolution": "1280x720",
+    "fps": 30,
+    "backend": "rpicam-vid"
+  },
+  "storage": {
+    "mount_path": "/mnt/road-recorder-usb",
+    "total_space_mb": 29000,
+    "free_space_mb": 25400,
+    "usage_percent": 12.4
+  },
+  "recording": {
+    "state": "IDLE",
+    "active_session": null
+  }
+}
+```
+
+---
+
+### ③ Start Recording — `POST /api/v1/recordings/start`
+
+Start a new video recording session. Optionally specify duration in seconds (5–3600).
+
+**cURL — Record for 60 seconds:**
+```bash
+curl -X POST http://192.168.1.100:8000/api/v1/recordings/start \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"duration_seconds": 60}'
+```
+
+**cURL — Record continuously (stop manually later):**
+```bash
+curl -X POST http://192.168.1.100:8000/api/v1/recordings/start \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+**PowerShell:**
+```powershell
+$headers = @{ "X-API-Key" = "YOUR_API_KEY" }
+$body = '{"duration_seconds": 60}'
+Invoke-RestMethod http://192.168.1.100:8000/api/v1/recordings/start `
+  -Method Post -Headers $headers -Body $body -ContentType "application/json"
+```
+
+**Response (200 OK):**
+```json
+{
+  "session_id": "session_20261014_003300_a1b2c3",
+  "status": "recording",
+  "message": "Recording session started.",
+  "requested_duration_seconds": 60
+}
+```
+
+**Error — Already recording (409 Conflict):**
+```json
+{
+  "detail": "A recording session is already active. Stop it first with POST /api/v1/recordings/stop"
+}
+```
+
+**Error — USB not available (503):**
+```json
+{
+  "detail": "USB recording drive not available. Recording has not started."
+}
+```
+
+---
+
+### ④ Stop Recording — `POST /api/v1/recordings/stop`
+
+Stop the currently active recording. The video segment is finalized to MP4.
+
+**cURL:**
+```bash
+curl -X POST http://192.168.1.100:8000/api/v1/recordings/stop \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**PowerShell:**
+```powershell
+$headers = @{ "X-API-Key" = "YOUR_API_KEY" }
+Invoke-RestMethod http://192.168.1.100:8000/api/v1/recordings/stop `
+  -Method Post -Headers $headers
+```
+
+**Response (200 OK):**
+```json
+{
+  "session_id": "session_20261014_003300_a1b2c3",
+  "status": "stopped",
+  "message": "Recording stopped and segment finalized.",
+  "segments_recorded": 1
+}
+```
+
+---
+
+### ⑤ Check Session Progress — `GET /api/v1/recordings/{session_id}`
+
+Poll a recording session to check how far along it is.
+
+**cURL:**
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" \
+  http://192.168.1.100:8000/api/v1/recordings/session_20261014_003300_a1b2c3
+```
+
+**PowerShell:**
+```powershell
+$headers = @{ "X-API-Key" = "YOUR_API_KEY" }
+Invoke-RestMethod http://192.168.1.100:8000/api/v1/recordings/session_20261014_003300_a1b2c3 -Headers $headers
+```
+
+**Response (200 OK — while recording):**
+```json
+{
+  "session_id": "session_20261014_003300_a1b2c3",
+  "status": "recording",
+  "elapsed_seconds": 23.5,
+  "requested_duration_seconds": 60,
+  "segments_completed": 0
+}
+```
+
+**Response (200 OK — after recording finishes):**
+```json
+{
+  "session_id": "session_20261014_003300_a1b2c3",
+  "status": "completed",
+  "elapsed_seconds": 60.0,
+  "segments_completed": 1
+}
+```
+
+---
+
+### ⑥ List All Recordings — `GET /api/v1/recordings`
+
+Get a paginated list of all saved MP4 recordings on the USB drive.
+
+**cURL — Get latest 20 recordings:**
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" \
+  http://192.168.1.100:8000/api/v1/recordings
+```
+
+**cURL — Filter by date and paginate:**
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" \
+  "http://192.168.1.100:8000/api/v1/recordings?date=2026-10-14&page=1&per_page=10"
+```
+
+**PowerShell:**
+```powershell
+$headers = @{ "X-API-Key" = "YOUR_API_KEY" }
+Invoke-RestMethod "http://192.168.1.100:8000/api/v1/recordings?per_page=10" -Headers $headers
+```
+
+**Response (200 OK):**
+```json
+{
+  "total_recordings": 3,
+  "page": 1,
+  "per_page": 20,
+  "items": [
+    {
+      "recording_id": "RR_20261014_003300_001",
+      "start_timestamp": "2026-10-14T00:33:00",
+      "duration_sec": 60.0,
+      "file_size_bytes": 4200000,
+      "codec": "h264",
+      "resolution": "1280x720",
+      "download_url": "/api/v1/recordings/RR_20261014_003300_001/video"
+    },
+    {
+      "recording_id": "RR_20261013_210000_001",
+      "start_timestamp": "2026-10-13T21:00:00",
+      "duration_sec": 300.0,
+      "file_size_bytes": 21000000,
+      "codec": "h264",
+      "resolution": "1280x720",
+      "download_url": "/api/v1/recordings/RR_20261013_210000_001/video"
+    }
+  ]
+}
+```
+
+---
+
+### ⑦ Download Video — `GET /api/v1/recordings/{id}/video`
+
+Download the MP4 video file. Supports **HTTP Range requests** for resumable downloads.
+
+**cURL — Download full file:**
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" \
+  -o RR_20261014_003300_001.mp4 \
+  http://192.168.1.100:8000/api/v1/recordings/RR_20261014_003300_001/video
+```
+
+**cURL — Download with progress bar:**
+```bash
+curl -# -H "X-API-Key: YOUR_API_KEY" \
+  -o recording.mp4 \
+  http://192.168.1.100:8000/api/v1/recordings/RR_20261014_003300_001/video
+```
+
+**cURL — Resume partial download (Range request):**
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" \
+  -H "Range: bytes=1048576-" \
+  -o recording_resumed.mp4 \
+  http://192.168.1.100:8000/api/v1/recordings/RR_20261014_003300_001/video
+```
+
+**PowerShell — Download to file:**
+```powershell
+$headers = @{ "X-API-Key" = "YOUR_API_KEY" }
+$id = "RR_20261014_003300_001"
+Invoke-WebRequest "http://192.168.1.100:8000/api/v1/recordings/$id/video" `
+  -Headers $headers -OutFile "$id.mp4"
+```
+
+**Response (200 OK):** Binary MP4 file with `Content-Type: video/mp4`
+
+**Response (206 Partial Content):** Partial content with `Content-Range: bytes 1048576-4199999/4200000`
+
+**Response (404 Not Found):**
+```json
+{
+  "detail": "Recording 'RR_nonexistent' not found in index."
+}
+```
+
+---
+
+### ⑧ Recording Metadata — `GET /api/v1/recordings/{id}/metadata`
+
+Get technical details about a specific recording without downloading the video.
+
+**cURL:**
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" \
+  http://192.168.1.100:8000/api/v1/recordings/RR_20261014_003300_001/metadata
+```
+
+**PowerShell:**
+```powershell
+$headers = @{ "X-API-Key" = "YOUR_API_KEY" }
+Invoke-RestMethod http://192.168.1.100:8000/api/v1/recordings/RR_20261014_003300_001/metadata -Headers $headers
+```
+
+**Response (200 OK):**
+```json
+{
+  "recording_id": "RR_20261014_003300_001",
+  "relative_path": "2026-10-14/RR_20261014_003300_001.mp4",
+  "start_timestamp": "2026-10-14T00:33:00",
+  "end_timestamp": "2026-10-14T00:34:00",
+  "duration_sec": 60.0,
+  "width": 1280,
+  "height": 720,
+  "fps": 30,
+  "codec": "h264",
+  "file_size_bytes": 4200000,
+  "finalization_status": "finalized",
+  "capture_backend": "rpicam-vid"
+}
+```
+
+---
+
+### ⑨ Stream Status — `GET /api/v1/stream/status`
+
+Check if a live stream is active and view CSI camera hardware concurrency analysis.
+
+**cURL:**
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" \
+  http://192.168.1.100:8000/api/v1/stream/status
+```
+
+**Response (200 OK):**
+```json
+{
+  "stream_active": false,
+  "stream_id": null,
+  "camera_occupied_by_recording": false,
+  "message": "No live stream session is currently active.",
+  "architecture_analysis": {
+    "camera_sensor": "Sony IMX219 (CSI-2 2-lane)",
+    "concurrency_limitation": "The Linux unicam CSI driver grants exclusive access to one process at a time.",
+    "recommended_production_workflow": "Use Workflow 1 (Record & Download) for 100% video integrity."
+  }
+}
+```
+
+---
+
+### ⑩ Start Live Stream — `POST /api/v1/stream/start`
+
+> [!WARNING]
+> Live streaming and recording **cannot run simultaneously** due to hardware camera lock. Stop any recording before starting a stream.
+
+**cURL:**
+```bash
+curl -X POST http://192.168.1.100:8000/api/v1/stream/start \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"protocol": "rtsp", "duration_seconds": 300}'
+```
+
+**Response (200 OK):**
+```json
+{
+  "stream_id": "stream_a1b2c3d4",
+  "status": "active",
+  "supported_protocols": ["rtsp", "mjpeg"],
+  "message": "Stream session stream_a1b2c3d4 registered."
+}
+```
+
+**Error (409 — camera busy with recording):**
+```json
+{
+  "detail": "Camera hardware is currently exclusively occupied by an active recording session."
+}
+```
+
+---
+
+### ⑪ Stop Live Stream — `POST /api/v1/stream/stop`
+
+**cURL:**
+```bash
+curl -X POST http://192.168.1.100:8000/api/v1/stream/stop \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response (200 OK):**
+```json
+{
+  "status": "stopped",
+  "stream_id": "stream_a1b2c3d4",
+  "message": "Live stream session stopped successfully."
+}
+```
+
+---
+
+## 8. Complete Workflow Example — Record, Download & Verify
+
+Here is the full step-by-step workflow a remote team would follow:
+
+```bash
+# ── Step 1: Set your variables ──
+PI_IP="192.168.1.100"
+API_KEY="YOUR_API_KEY"
+BASE="http://$PI_IP:8000"
+
+# ── Step 2: Check device health ──
+curl -s "$BASE/api/v1/health" | python3 -m json.tool
+
+# ── Step 3: Check device details ──
+curl -s -H "X-API-Key: $API_KEY" "$BASE/api/v1/device/status" | python3 -m json.tool
+
+# ── Step 4: Start a 30-second recording ──
+SESSION=$(curl -s -X POST "$BASE/api/v1/recordings/start" \
+  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"duration_seconds": 30}' | python3 -c "import sys,json; print(json.load(sys.stdin)['session_id'])")
+echo "Session: $SESSION"
+
+# ── Step 5: Wait and poll status ──
+sleep 10
+curl -s -H "X-API-Key: $API_KEY" "$BASE/api/v1/recordings/$SESSION" | python3 -m json.tool
+
+# ── Step 6: Stop recording (or wait for auto-stop) ──
+sleep 25
+curl -s -X POST "$BASE/api/v1/recordings/stop" -H "X-API-Key: $API_KEY" | python3 -m json.tool
+
+# ── Step 7: List available recordings ──
+curl -s -H "X-API-Key: $API_KEY" "$BASE/api/v1/recordings" | python3 -m json.tool
+
+# ── Step 8: Download the latest video ──
+RECORDING_ID="RR_20261014_003300_001"  # Replace with actual ID from step 7
+curl -# -H "X-API-Key: $API_KEY" -o "$RECORDING_ID.mp4" "$BASE/api/v1/recordings/$RECORDING_ID/video"
+
+# ── Step 9: Verify the downloaded file ──
+file "$RECORDING_ID.mp4"
+ffprobe "$RECORDING_ID.mp4" 2>&1 | head -20
+```
+
+### Windows PowerShell — Complete Workflow
+```powershell
+# ── Setup ──
+$base = "http://192.168.1.100:8000"
+$headers = @{ "X-API-Key" = "YOUR_API_KEY" }
+
+# ── Health Check ──
 Invoke-RestMethod "$base/api/v1/health"
 
-# Device status
+# ── Device Status ──
 Invoke-RestMethod "$base/api/v1/device/status" -Headers $headers
 
-# Start 30-second recording
+# ── Start 30s Recording ──
 $body = '{"duration_seconds": 30}'
-$session = Invoke-RestMethod "$base/api/v1/recordings/start" -Method Post -Headers $headers -Body $body -ContentType "application/json"
-$session.session_id
+$session = Invoke-RestMethod "$base/api/v1/recordings/start" `
+  -Method Post -Headers $headers -Body $body -ContentType "application/json"
+Write-Host "Session ID: $($session.session_id)"
 
-# Poll session
+# ── Wait and Poll ──
 Start-Sleep -Seconds 35
 Invoke-RestMethod "$base/api/v1/recordings/$($session.session_id)" -Headers $headers
 
-# List recordings
+# ── List Recordings ──
 $recordings = Invoke-RestMethod "$base/api/v1/recordings" -Headers $headers
-$recordings.items
+$recordings.items | Format-Table recording_id, duration_sec, file_size_bytes
 
-# Download MP4
+# ── Download Latest MP4 ──
 $id = $recordings.items[0].recording_id
 Invoke-WebRequest "$base/api/v1/recordings/$id/video" -Headers $headers -OutFile "$id.mp4"
+Write-Host "Downloaded: $id.mp4"
+
+# ── Verify File ──
+Get-Item "$id.mp4" | Select-Object Name, Length
 ```
 
-### Linux cURL Quick Test
+### Python Consumer Client (Automated)
 ```bash
-API_KEY="YOUR_API_KEY"
-BASE="http://192.168.1.100:8000"
+# Install dependency
+pip install requests
 
-# Health check
-curl -s "$BASE/api/v1/health" | python3 -m json.tool
+# Full automated workflow
+python3 examples/client_consumer.py \
+  --host 192.168.1.100 \
+  --api-key YOUR_API_KEY \
+  --duration 30 \
+  --output-dir ./downloaded_recordings
 
-# Start recording
-curl -s -X POST "$BASE/api/v1/recordings/start" \
-  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
-  -d '{"duration_seconds": 30}'
+# Health check only
+python3 examples/client_consumer.py --host 192.168.1.100 --api-key YOUR_API_KEY --health-only
 
-# Download with Range support
-curl -H "X-API-Key: $API_KEY" -o recording.mp4 \
-  "$BASE/api/v1/recordings/RR_20261013_210000_001/video"
+# Just list existing recordings
+python3 examples/client_consumer.py --host 192.168.1.100 --api-key YOUR_API_KEY --list-only
 ```
+
+### HTTP Error Codes Quick Reference
+
+| Code | Meaning | When You See It |
+|------|---------|-----------------|
+| `200` | Success | Request completed successfully |
+| `206` | Partial Content | Range request — partial video download |
+| `400` | Bad Request | Invalid duration or parameters |
+| `401` | Unauthorized | Missing or wrong `X-API-Key` |
+| `404` | Not Found | Recording ID doesn't exist |
+| `409` | Conflict | Trying to start recording when one is already running |
+| `422` | Validation Error | Request body doesn't match schema (e.g., duration < 5s) |
+| `503` | Service Unavailable | USB drive not mounted or not verified |
+
 
 ---
 
-## 8. Systemd Auto-Start Service
+## 9. Systemd Auto-Start Service
 
 Install the systemd service for headless auto-start on boot:
 
@@ -388,7 +834,7 @@ The service is gated by:
 
 ---
 
-## 9. Locating and Playing Saved Videos
+## 10. Locating and Playing Saved Videos
 
 - **Command Line:**
   ```bash
@@ -405,7 +851,7 @@ The service is gated by:
 
 ---
 
-## 10. Running Tests
+## 11. Running Tests
 
 ### Full Test Suite (Core + API)
 ```bash
@@ -424,7 +870,7 @@ py -3.13 run_tests.py
 
 ---
 
-## 11. Camera Concurrency Architecture
+## 12. Camera Concurrency Architecture
 
 > [!WARNING]
 > **Hardware Limitation:** The Sony IMX219 CSI-2 camera on Raspberry Pi 4 is accessed via the Linux `unicam` driver, which grants **exclusive single-process access** to the camera buffer. When `rpicam-vid` records to an MP4 file, a second camera capture process **cannot** simultaneously open the sensor.
@@ -436,7 +882,7 @@ py -3.13 run_tests.py
 
 ---
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 | Symptom | Cause | Solution |
 |---|---|---|
