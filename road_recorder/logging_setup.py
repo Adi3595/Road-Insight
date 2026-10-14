@@ -7,6 +7,7 @@ Logs directly to the dedicated USB drive (/mnt/road-recorder-usb/logs/recording.
 import logging
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 class FlushingFileHandler(logging.FileHandler):
@@ -16,15 +17,12 @@ class FlushingFileHandler(logging.FileHandler):
         self.flush()
 
 
-def setup_logger(log_dir: Path, level_str: str = "INFO") -> logging.Logger:
-    """Initialize root application logger directed to USB storage."""
-    try:
-        log_dir.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-
-    log_file = log_dir / "recording.log"
-
+def setup_logger(
+    log_dir: Optional[Path] = None,
+    level_str: str = "INFO",
+    enable_file_logging: bool = True
+) -> logging.Logger:
+    """Initialize root application logger directed to console and optionally USB storage."""
     level = getattr(logging, level_str.upper(), logging.INFO)
     logger = logging.getLogger("road_recorder")
     logger.setLevel(level)
@@ -49,14 +47,17 @@ def setup_logger(log_dir: Path, level_str: str = "INFO") -> logging.Logger:
     console_handler.setFormatter(console_format)
     logger.addHandler(console_handler)
 
-    # File Handler
-    try:
-        file_handler = FlushingFileHandler(str(log_file), encoding="utf-8")
-        file_handler.setLevel(level)
-        file_handler.setFormatter(file_format)
-        logger.addHandler(file_handler)
-    except Exception as e:
-        logger.warning(f"Failed to open log file at {log_file}: {e}")
+    # File Handler (only if enabled and log_dir provided)
+    if enable_file_logging and log_dir:
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / "recording.log"
+            file_handler = FlushingFileHandler(str(log_file), encoding="utf-8")
+            file_handler.setLevel(level)
+            file_handler.setFormatter(file_format)
+            logger.addHandler(file_handler)
+        except Exception as e:
+            logger.warning(f"Failed to open log file at {log_dir}: {e}")
 
     logger.propagate = False
     return logger

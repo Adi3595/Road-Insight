@@ -615,7 +615,7 @@ Invoke-RestMethod http://192.168.1.100:8000/api/v1/recordings/RR_20261014_003300
 
 ### ⑨ Stream Status — `GET /api/v1/stream/status`
 
-Check if a live stream is active and view CSI camera hardware concurrency analysis.
+Check live stream support status and CSI camera hardware concurrency analysis.
 
 **cURL:**
 ```bash
@@ -626,10 +626,11 @@ curl -H "X-API-Key: YOUR_API_KEY" \
 **Response (200 OK):**
 ```json
 {
+  "stream_supported": false,
   "stream_active": false,
   "stream_id": null,
   "camera_occupied_by_recording": false,
-  "message": "No live stream session is currently active.",
+  "message": "Live streaming is not implemented on the single-pipeline camera stack. The camera hardware is dedicated to MP4 file recording on the USB drive. Use Workflow 1 (POST /api/v1/recordings/start and GET /api/v1/recordings/{id}/video).",
   "architecture_analysis": {
     "camera_sensor": "Sony IMX219 (CSI-2 2-lane)",
     "concurrency_limitation": "The Linux unicam CSI driver grants exclusive access to one process at a time.",
@@ -640,10 +641,10 @@ curl -H "X-API-Key: YOUR_API_KEY" \
 
 ---
 
-### ⑩ Start Live Stream — `POST /api/v1/stream/start`
+### ⑩ Start Live Stream — `POST /api/v1/stream/start` (Unsupported)
 
-> [!WARNING]
-> Live streaming and recording **cannot run simultaneously** due to hardware camera lock. Stop any recording before starting a stream.
+> [!NOTE]
+> **Endpoint Status:** Returns **`501 Not Implemented`**. Real-time streaming is not implemented on the single-pipeline CSI camera stack. The camera hardware is exclusively owned by the MP4 recording pipeline to guarantee full frame rate and lossless storage. Downstream AI/CV pipelines must use Workflow 1 (request bounded recording, poll status, download finalized MP4).
 
 **cURL:**
 ```bash
@@ -653,39 +654,21 @@ curl -X POST http://192.168.1.100:8000/api/v1/stream/start \
   -d '{"protocol": "rtsp", "duration_seconds": 300}'
 ```
 
-**Response (200 OK):**
+**Response (501 Not Implemented):**
 ```json
 {
-  "stream_id": "stream_a1b2c3d4",
-  "status": "active",
-  "supported_protocols": ["rtsp", "mjpeg"],
-  "message": "Stream session stream_a1b2c3d4 registered."
-}
-```
-
-**Error (409 — camera busy with recording):**
-```json
-{
-  "detail": "Camera hardware is currently exclusively occupied by an active recording session."
+  "detail": "Live video streaming is not implemented. The Sony IMX219 CSI camera operates under exclusive single-process hardware ownership dedicated to high-fidelity MP4 recording. Use Workflow 1: request a bounded recording session via POST /api/v1/recordings/start and download the finalized MP4 via GET /api/v1/recordings/{id}/video."
 }
 ```
 
 ---
 
-### ⑪ Stop Live Stream — `POST /api/v1/stream/stop`
+### ⑪ Stop Live Stream — `POST /api/v1/stream/stop` (Unsupported)
 
-**cURL:**
-```bash
-curl -X POST http://192.168.1.100:8000/api/v1/stream/stop \
-  -H "X-API-Key: YOUR_API_KEY"
-```
-
-**Response (200 OK):**
+**Response (501 Not Implemented):**
 ```json
 {
-  "status": "stopped",
-  "stream_id": "stream_a1b2c3d4",
-  "message": "Live stream session stopped successfully."
+  "detail": "Live video streaming is not implemented."
 }
 ```
 
@@ -792,16 +775,39 @@ python3 examples/client_consumer.py --host 192.168.1.100 --api-key YOUR_API_KEY 
 | Code | Meaning | When You See It |
 |------|---------|-----------------|
 | `200` | Success | Request completed successfully |
-| `206` | Partial Content | Range request — partial video download |
-| `400` | Bad Request | Invalid duration or parameters |
-| `401` | Unauthorized | Missing or wrong `X-API-Key` |
-| `404` | Not Found | Recording ID doesn't exist |
-| `409` | Conflict | Trying to start recording when one is already running |
-| `422` | Validation Error | Request body doesn't match schema (e.g., duration < 5s) |
-| `503` | Service Unavailable | USB drive not mounted or not verified |
-
+| `206` | Partial Content | Range request — partial video download (RFC 7233) |
+| `400` | Bad Request | Invalid duration, date format, or download of unfinalized recording |
+| `401` | Unauthorized | Missing or invalid `X-API-Key` |
+| `404` | Not Found | Recording ID or session ID does not exist |
+| `409` | Conflict | Attempted concurrent recording session while another is active |
+| `416` | Range Not Satisfiable | Out-of-bounds byte range or unsupported multiple ranges |
+| `422` | Validation Error | Request body syntax error or missing required fields |
+| `501` | Not Implemented | Live video streaming request (`/api/v1/stream/*`) |
+| `503` | Service Unavailable | USB drive not mounted, wrong UUID, or unverified storage |
 
 ---
+
+### Security & Network Access Policy
+
+> [!IMPORTANT]
+> **LAN/VPN Deployment Only:**
+> 1. **No Public Internet Exposure:** The Road Recorder API is designed for private, in-vehicle LANs or authenticated VPNs (WireGuard / Tailscale). Never expose port 8000 directly to the public internet.
+> 2. **CORS Hardening:** `cors_origins` is set to `[]` (empty list) by default. Wildcard CORS (`*`) is never combined with credentials. Add specific origins (e.g. `http://192.168.1.50:3000`) only when web dashboard integration is required.
+> 3. **API Key Storage:** API keys are generated with 256-bit cryptographic randomness (`secrets.token_urlsafe(32)`) and stored with `0o600` permissions exclusively on the verified USB drive (`/mnt/road-recorder-usb/.road-recorder-api.key`).
+> 4. **Path Traversal Prevention:** Video downloads strictly validate real filesystem paths (`os.path.realpath`) against the recordings root, blocking directory traversal (`../`) and symlink escapes.
+
+---
+
+### USB Storage Verification & Safeguards
+
+> [!CAUTION]
+> **Strict No-Fallback Policy (`allow_fallback_to_sd: false`):**
+> The recorder **strictly refuses** to write to the microSD card or root filesystem under any circumstances to prevent microSD exhaustion and system corruption.
+> - **Mount Path:** `/mnt/road-recorder-usb`
+> - **Filesystem UUID:** Strictly matched against `70AA-2D80` via Linux block device inspection.
+> - **Volume Marker:** `.road-recorder-volume` must identify `app: "road-recorder"` and its `volume_id` must match `70AA-2D80`.
+> - **Fail-Closed Pre-flight:** If the USB drive is absent, unmounted, read-only, has the wrong UUID, or has a mismatched volume marker, the API server lifespan immediately aborts process startup, and the recording engine refuses to launch.
+
 
 ## 9. Systemd Auto-Start Service
 

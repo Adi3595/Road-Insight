@@ -117,3 +117,149 @@ def test_verified_usb_healthy_allows_recording(tmp_path: Path):
             assert mgr.is_critical() is False
             metrics = mgr.get_storage_metrics()
             assert metrics["status"] == "HEALTHY"
+
+
+def test_missing_usb_causes_no_writes_or_creation(tmp_path: Path):
+    """Safeguard: When USB is missing, no directories, probe files, or markers are created."""
+    target_path = tmp_path / "absent_usb"
+    mgr = StorageManager(mount_path=target_path, require_verified_usb=True)
+
+    can_rec, msg = mgr.can_start_recording()
+    assert can_rec is False
+    assert not target_path.exists(), "Underlying absent mount directory must not be created!"
+
+
+def test_similarly_prefixed_directory_rejected(tmp_path: Path):
+    """Safeguard: /mnt/road-recorder-usb-other cannot masquerade as /mnt/road-recorder-usb."""
+    from hardware.storage.storage_check import _is_path_covered_by_mount
+
+    legit_mount = Path("/mnt/road-recorder-usb")
+    impostor = Path("/mnt/road-recorder-usb-other")
+    child = Path("/mnt/road-recorder-usb/recordings")
+
+    assert not _is_path_covered_by_mount(impostor, legit_mount)
+    assert _is_path_covered_by_mount(child, legit_mount)
+    assert _is_path_covered_by_mount(legit_mount, legit_mount)
+
+
+def test_wrong_uuid_rejected(tmp_path: Path):
+    """Safeguard: USB partition with mismatched UUID is rejected."""
+    fake_mount = tmp_path / "mnt_usb"
+    fake_mount.mkdir()
+
+    from hardware.storage.storage_check import verify_usb_mount_safety, create_volume_marker
+
+    # Create marker with correct UUID
+    create_volume_marker(fake_mount, volume_id="70AA-2D80")
+
+    mock_mount_info = {
+        "is_mount_point": True,
+        "is_microsd": False,
+        "is_root_filesystem": False,
+        "is_usb": True,
+        "device": "/dev/sdb1",
+        "fstype": "exfat",
+        "options": ["rw"],
+        "uuid": "WRONG-UUID-9999"
+    }
+
+    with patch("hardware.storage.storage_check.get_mount_info_for_path", return_value=mock_mount_info):
+        verif = verify_usb_mount_safety(
+            mount_path_str=str(fake_mount),
+            expected_uuid="70AA-2D80",
+            require_verified_usb=True,
+            run_write_probe=True
+        )
+        assert verif["safe_to_start"] is False
+        assert any("does not match required USB volume UUID" in r for r in verif["reasons_blocked"])
+
+
+def test_mismatched_marker_uuid_rejected(tmp_path: Path):
+    """Safeguard: Drive with marker copied from another volume (mismatched volume_id) is rejected."""
+    fake_mount = tmp_path / "mnt_usb"
+    fake_mount.mkdir()
+
+    from hardware.storage.storage_check import verify_usb_mount_safety, create_volume_marker
+
+    # Marker created with DIFFERENT uuid
+    create_volume_marker(fake_mount, volume_id="COPIED-FROM-ANOTHER-DRIVE")
+
+    mock_mount_info = {
+        "is_mount_point": True,
+        "is_microsd": False,
+        "is_root_filesystem": False,
+        "is_usb": True,
+        "device": "/dev/sda1",
+        "fstype": "exfat",
+        "options": ["rw"],
+        "uuid": "70AA-2D80"
+    }
+
+    with patch("hardware.storage.storage_check.get_mount_info_for_path", return_value=mock_mount_info):
+        verif = verify_usb_mount_safety(
+            mount_path_str=str(fake_mount),
+            expected_uuid="70AA-2D80",
+            require_verified_usb=True
+        )
+        assert verif["safe_to_start"] is False
+        assert any("does not match expected volume identity" in r for r in verif["reasons_blocked"])
+
+
+def test_readonly_filesystem_rejected(tmp_path: Path):
+    """Safeguard: Read-only mount ('ro') is rejected immediately."""
+    fake_mount = tmp_path / "mnt_usb"
+    fake_mount.mkdir()
+
+    from hardware.storage.storage_check import verify_usb_mount_safety, create_volume_marker
+    create_volume_marker(fake_mount, volume_id="70AA-2D80")
+
+    mock_mount_info = {
+        "is_mount_point": True,
+        "is_microsd": False,
+        "is_root_filesystem": False,
+        "is_usb": True,
+        "device": "/dev/sda1",
+        "fstype": "exfat",
+        "options": ["ro"],  # Read-only!
+        "uuid": "70AA-2D80"
+    }
+
+    with patch("hardware.storage.storage_check.get_mount_info_for_path", return_value=mock_mount_info):
+        verif = verify_usb_mount_safety(
+            mount_path_str=str(fake_mount),
+            expected_uuid="70AA-2D80",
+            require_verified_usb=True
+        )
+        assert verif["safe_to_start"] is False
+        assert any("read-only" in r for r in verif["reasons_blocked"])
+
+
+def test_probe_never_attempted_if_preconditions_fail(tmp_path: Path):
+    """Safeguard: Write probe is NEVER called if UUID, marker, or mount checks fail."""
+    fake_mount = tmp_path / "mnt_usb"
+    fake_mount.mkdir()
+
+    from hardware.storage.storage_check import verify_usb_mount_safety
+
+    mock_mount_info = {
+        "is_mount_point": False,  # Not mounted!
+        "is_microsd": False,
+        "is_root_filesystem": False,
+        "is_usb": False,
+        "device": None,
+        "fstype": None,
+        "options": [],
+        "uuid": None
+    }
+
+    with patch("hardware.storage.storage_check.get_mount_info_for_path", return_value=mock_mount_info):
+        with patch("hardware.storage.storage_check.run_safe_rw_test") as mock_probe:
+            verif = verify_usb_mount_safety(
+                mount_path_str=str(fake_mount),
+                expected_uuid="70AA-2D80",
+                require_verified_usb=True,
+                run_write_probe=True
+            )
+            assert verif["safe_to_start"] is False
+            # PROBE MUST NEVER BE CALLED!
+            mock_probe.assert_not_called()

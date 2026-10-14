@@ -29,15 +29,15 @@ class StreamStartRequest(BaseModel):
     duration_seconds: Optional[int] = Field(300, ge=10, le=1800, description="Session timeout in seconds")
 
 
-@router.get("/status", summary="Get live stream status & hardware capability report")
+@router.get("/status", summary="Get live stream capability and hardware architecture report")
 def get_stream_status(
     recorder: RoadRecorder = Depends(get_recorder),
     _auth: str = Depends(verify_api_key)
 ):
     """
-    Query whether a live stream is genuinely active and inspect hardware concurrency status.
+    Inspect live stream capability and hardware concurrency constraints.
+    Reports streaming as unsupported on the single-pipeline camera stack.
     """
-    global _active_stream
     is_recording = recorder.state in ["RECORDING", "STARTING", "ROTATING"]
 
     analysis = {
@@ -59,97 +59,47 @@ def get_stream_status(
         )
     }
 
-    if _active_stream and _active_stream.get("is_active"):
-        elapsed = round(time.time() - _active_stream["start_time"], 1)
-        return {
-            "stream_active": True,
-            "stream_id": _active_stream["stream_id"],
-            "protocol": _active_stream["protocol"],
-            "elapsed_seconds": elapsed,
-            "camera_occupied_by_recording": is_recording,
-            "architecture_analysis": analysis
-        }
-
     return {
+        "stream_supported": False,
         "stream_active": False,
         "stream_id": None,
         "camera_occupied_by_recording": is_recording,
-        "message": "No live stream session is currently active.",
+        "message": (
+            "Live streaming is not implemented on the single-pipeline camera stack. "
+            "The camera hardware is dedicated to MP4 file recording on the USB drive. "
+            "Use Workflow 1 (POST /api/v1/recordings/start and GET /api/v1/recordings/{id}/video)."
+        ),
         "architecture_analysis": analysis
     }
 
 
-@router.post("/start", response_model=StreamSessionResponse, summary="Start live stream session")
+@router.post("/start", summary="Start live stream session (unimplemented)")
 def start_live_stream(
     req: StreamStartRequest,
-    recorder: RoadRecorder = Depends(get_recorder),
-    config: AppConfig = Depends(get_config),
     _auth: str = Depends(verify_api_key)
 ):
     """
-    Request initiation of a live video stream.
-    Rejects with 409 Conflict if camera is currently recording.
+    Returns 501 Not Implemented. Real-time streaming is not implemented on the single-pipeline camera stack.
     """
-    global _active_stream
-
-    # 1. Hardware conflict check: CSI camera cannot be accessed if recording is running
-    if recorder.state in ["RECORDING", "STARTING", "ROTATING"]:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "Camera hardware is currently exclusively occupied by an active recording session. "
-                "Simultaneous raw stream capture is not supported by the single-pipeline camera driver. "
-                "Use Workflow 1 (Record & Download) or stop recording before requesting a stream."
-            )
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail=(
+            "Live video streaming is not implemented. The Sony IMX219 CSI camera operates under "
+            "exclusive single-process hardware ownership dedicated to high-fidelity MP4 recording. "
+            "Use Workflow 1: request a bounded recording session via POST /api/v1/recordings/start "
+            "and download the finalized MP4 via GET /api/v1/recordings/{id}/video."
         )
-
-    # 2. Check if a stream is already active
-    if _active_stream and _active_stream.get("is_active"):
-        return StreamSessionResponse(
-            stream_id=_active_stream["stream_id"],
-            status="active",
-            supported_protocols=["rtsp", "mjpeg"],
-            message=f"Live stream session {_active_stream['stream_id']} is already running.",
-            investigation_details={"active_protocol": _active_stream["protocol"]}
-        )
-
-    stream_id = f"stream_{uuid.uuid4().hex[:8]}"
-    _active_stream = {
-        "stream_id": stream_id,
-        "is_active": True,
-        "protocol": req.protocol.lower(),
-        "start_time": time.time(),
-        "duration_seconds": req.duration_seconds
-    }
-
-    logger.info(f"Initialized live stream session {stream_id} ({req.protocol})")
-    return StreamSessionResponse(
-        stream_id=stream_id,
-        status="active",
-        supported_protocols=["rtsp", "mjpeg"],
-        message=(
-            f"Stream session {stream_id} registered. "
-            "For production pipelines, consuming teams should connect to RTSP port 8554 via secure WireGuard/VPN."
-        ),
-        investigation_details={
-            "session_timeout_seconds": req.duration_seconds,
-            "exclusive_mode": True
-        }
     )
 
 
-@router.post("/stop", summary="Stop active live stream session")
+@router.post("/stop", summary="Stop live stream session (unimplemented)")
 def stop_live_stream(
     _auth: str = Depends(verify_api_key)
 ):
     """
-    Cleanly terminate the active live stream session and release camera resources.
+    Returns 501 Not Implemented. Real-time streaming is not implemented.
     """
-    global _active_stream
-    if not _active_stream or not _active_stream.get("is_active"):
-        return {"status": "idle", "message": "No active live stream to stop."}
-
-    stream_id = _active_stream["stream_id"]
-    _active_stream = None
-    logger.info(f"Terminated live stream session {stream_id}")
-    return {"status": "stopped", "stream_id": stream_id, "message": "Live stream session stopped successfully."}
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Live video streaming is not implemented."
+    )

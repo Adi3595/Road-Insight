@@ -40,22 +40,29 @@ class StorageManager:
         self.low_space_warning_percent = low_space_warning_percent
 
     def check_permissions(self) -> bool:
-        """Verify write access non-destructively."""
+        """Verify write access non-destructively without writing to unverified paths."""
         if not self.mount_path.exists():
             return False
-        rw_ok, _ = run_safe_rw_test(self.mount_path)
-        return rw_ok
-
-    def get_storage_metrics(self) -> Dict[str, Any]:
-        """
-        Query storage status, mount safety, and free capacity metrics.
-        """
-        # Run verification check
         verif = verify_usb_mount_safety(
             mount_path_str=str(self.mount_path),
             expected_uuid=self.volume_uuid or None,
             require_verified_usb=self.require_verified_usb,
-            allow_fallback_to_sd=self.allow_fallback_to_sd
+            allow_fallback_to_sd=self.allow_fallback_to_sd,
+            run_write_probe=False
+        )
+        return verif["safe_to_start"] and verif["rw_test"].get("success", False)
+
+    def get_storage_metrics(self) -> Dict[str, Any]:
+        """
+        Query storage status, mount safety, and free capacity metrics.
+        Read-only telemetry: does not perform disk writes or probe file creation.
+        """
+        verif = verify_usb_mount_safety(
+            mount_path_str=str(self.mount_path),
+            expected_uuid=self.volume_uuid or None,
+            require_verified_usb=self.require_verified_usb,
+            allow_fallback_to_sd=self.allow_fallback_to_sd,
+            run_write_probe=False
         )
 
         mount_info = verif["mount_info"]
@@ -86,7 +93,7 @@ class StorageManager:
         if not verif["safe_to_start"]:
             if not mount_info.get("is_mount_point", False) and self.require_verified_usb:
                 status = "NOT_MOUNTED"
-            elif mount_info.get("is_microsd", False):
+            elif mount_info.get("is_microsd", False) or mount_info.get("is_root_filesystem", False):
                 status = "BLOCKED_MICROSD"
             elif not rw_test.get("success", False):
                 status = "READ_ONLY"
@@ -101,7 +108,7 @@ class StorageManager:
 
         return {
             "status": status,
-            "safe_to_record": verif["safe_to_start"] and (status not in ["CRITICAL_STORAGE", "READ_ONLY"]),
+            "safe_to_record": verif["safe_to_start"] and (status not in ["CRITICAL_STORAGE", "READ_ONLY", "NOT_MOUNTED", "BLOCKED_MICROSD", "UNVERIFIED"]),
             "mount_path": str(self.mount_path),
             "is_mount_point": mount_info.get("is_mount_point", False),
             "is_usb": mount_info.get("is_usb", False),
@@ -122,42 +129,38 @@ class StorageManager:
     def can_start_recording(self) -> Tuple[bool, str]:
         """
         Validate whether a recording session can safely begin.
-        Enforces USB requirement, prevents microSD fallback, and checks space.
+        Enforces full USB safety verification (device identity, UUID, marker, writability probe)
+        and checks capacity thresholds. Fail closed on any failure.
         """
-        metrics = self.get_storage_metrics()
+        # Run full verification including non-destructive read/write probe
+        verif = verify_usb_mount_safety(
+            mount_path_str=str(self.mount_path),
+            expected_uuid=self.volume_uuid or None,
+            require_verified_usb=self.require_verified_usb,
+            allow_fallback_to_sd=self.allow_fallback_to_sd,
+            run_write_probe=True
+        )
 
-        # 1. Require verified USB check
-        if self.require_verified_usb and not metrics["is_mount_point"]:
-            msg = "USB recording drive not available. Recording has not started."
-            logger.error(f"{msg} Reason: '{self.mount_path}' is not a mounted filesystem.")
-            return False, msg
+        if not verif["safe_to_start"]:
+            reasons = "; ".join(verif.get("reasons_blocked", []))
+            rejection = verif.get("rejection_message") or "USB recording drive not available. Recording has not started."
+            logger.error(f"{rejection} Reason: {reasons}")
+            return False, rejection
 
-        # 2. Block recording to microSD card
-        if not self.allow_fallback_to_sd and (metrics["status"] == "BLOCKED_MICROSD"):
-            msg = "USB recording drive not available. Recording has not started."
-            logger.error(f"{msg} Reason: Path resolves to microSD card.")
-            return False, msg
-
-        # 3. Check write access
-        if not metrics["writable"]:
-            msg = f"USB drive '{self.mount_path}' is not writable. Check mount options and permissions."
-            logger.error(msg)
-            return False, msg
-
-        # 4. Critical space check
-        if metrics["free_mb"] <= self.critical_free_space_mb:
+        # Capacity check
+        free_mb = verif["usage"].get("free_mb", 0.0)
+        if free_mb <= self.critical_free_space_mb:
             msg = (
-                f"Critical storage threshold reached ({metrics['free_mb']} MB free <= "
+                f"Critical storage threshold reached ({free_mb} MB free <= "
                 f"{self.critical_free_space_mb} MB limit). Recording cannot start."
             )
             logger.error(msg)
             return False, msg
 
-        # 5. Low space warning (logs warning but allows starting)
-        if metrics["status"] == "LOW_STORAGE":
+        # Low space warning
+        if free_mb <= (self.critical_free_space_mb * 2):
             logger.warning(
-                f"Low storage warning: {metrics['free_mb']} MB free ({metrics['free_pct']}%). "
-                f"Threshold: {self.low_space_warning_percent}%."
+                f"Low storage warning: {free_mb} MB free. Threshold: {self.critical_free_space_mb * 2} MB."
             )
 
         return True, "USB storage status verified and healthy."
@@ -168,11 +171,19 @@ class StorageManager:
         return metrics["free_mb"] <= self.critical_free_space_mb
 
     def is_usb_connected_and_mounted(self) -> bool:
-        """Quick check during recording to verify USB drive has not been disconnected."""
+        """Verify USB drive remains verified, mounted, and healthy during active recording."""
         if not self.require_verified_usb:
             return True
-        metrics = self.get_storage_metrics()
-        return metrics["is_mount_point"] and metrics["writable"]
+        if not self.mount_path.exists():
+            return False
+        verif = verify_usb_mount_safety(
+            mount_path_str=str(self.mount_path),
+            expected_uuid=self.volume_uuid or None,
+            require_verified_usb=True,
+            allow_fallback_to_sd=self.allow_fallback_to_sd,
+            run_write_probe=False
+        )
+        return bool(verif["safe_to_start"])
 
     def estimate_remaining_time_minutes(self, bitrate_bps: int = 5000000) -> float:
         """Estimate remaining recording minutes before reaching critical stop threshold."""

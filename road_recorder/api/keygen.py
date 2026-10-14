@@ -28,14 +28,18 @@ def main():
     key_file = config.api_key_file
 
     if args.rotate:
-        new_key = generate_and_save_api_key(key_file)
-        print("=" * 65)
-        print("[SUCCESS] API Key rotated successfully!")
-        print(f"Key saved to: {key_file}")
-        print(f"New API Key : {new_key}")
-        print("=" * 65)
-        print("Share this key securely with the consumer team. Example header:")
-        print(f"X-API-Key: {new_key}")
+        try:
+            new_key = generate_and_save_api_key(key_file, config=config)
+            print("=" * 65)
+            print("[SUCCESS] API Key rotated successfully!")
+            print(f"Key saved to: {key_file}")
+            print(f"New API Key : {new_key}")
+            print("=" * 65)
+            print("Share this key securely with the consumer team. Example header:")
+            print(f"X-API-Key: {new_key}")
+        except Exception as e:
+            print(f"[ERROR] Failed to rotate API key: {e}", file=sys.stderr)
+            sys.exit(1)
         return
 
     if args.show:
@@ -57,14 +61,18 @@ def main():
         print(f"[INFO] API key already exists in {key_file}.")
         print("Use --show to display it, or --rotate to generate a new key.")
     else:
-        new_key = generate_and_save_api_key(key_file)
-        print("=" * 65)
-        print("[SUCCESS] New API Key generated successfully!")
-        print(f"File location: {key_file}")
-        print(f"API Key      : {new_key}")
-        print("=" * 65)
-        print("Set in environment (optional):")
-        print(f"export {config.api_key_env_var}=\"{new_key}\"")
+        try:
+            new_key = generate_and_save_api_key(key_file, config=config)
+            print("=" * 65)
+            print("[SUCCESS] New API Key generated successfully!")
+            print(f"File location: {key_file}")
+            print(f"API Key      : {new_key}")
+            print("=" * 65)
+            print("Set in environment (optional):")
+            print(f"export {config.api_key_env_var}=\"{new_key}\"")
+        except Exception as e:
+            print(f"[ERROR] Failed to generate API key: {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

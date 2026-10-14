@@ -76,13 +76,14 @@ class RoadRecorder:
         # Local lockfile to avoid creating unmounted files on target path
         self.lock_file = Path.home() / ".road_recorder.lock"
 
-        # Recover prior interrupted segments if any
-        try:
-            recovered_count = self.segment_mgr.recover_orphaned_parts()
-            if recovered_count > 0:
-                logger.info(f"Crash recovery: found and preserved {recovered_count} prior session fragments.")
-        except Exception:
-            pass
+        # Recover prior interrupted segments only if recordings directory exists on storage
+        if self.config.recordings_path.exists():
+            try:
+                recovered_count = self.segment_mgr.recover_orphaned_parts()
+                if recovered_count > 0:
+                    logger.info(f"Crash recovery: found and preserved {recovered_count} prior session fragments.")
+            except Exception:
+                pass
 
     def _acquire_instance_lock(self) -> bool:
         """Ensure only one recorder process is accessing the hardware."""

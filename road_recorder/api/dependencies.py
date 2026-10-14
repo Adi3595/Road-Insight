@@ -14,12 +14,34 @@ _global_recorder: Optional[RoadRecorder] = None
 _global_auth: Optional[APIKeyAuth] = None
 
 
+def set_recorder(recorder: Optional[RoadRecorder]):
+    """Set the active global RoadRecorder singleton."""
+    global _global_recorder
+    _global_recorder = recorder
+
+
+def set_config(config: AppConfig):
+    """Set the active global AppConfig singleton and refresh auth."""
+    global _global_config, _global_auth
+    _global_config = config
+    _global_auth = APIKeyAuth(config)
+
+
 def init_dependencies(config: Optional[AppConfig] = None, recorder: Optional[RoadRecorder] = None):
-    """Initialize global shared singletons."""
+    """
+    Initialize global shared singletons safely.
+    Does NOT instantiate RoadRecorder if one is not provided, preventing premature disk writes.
+    """
     global _global_config, _global_recorder, _global_auth
-    _global_config = config or load_config("config.yaml")
-    _global_recorder = recorder or RoadRecorder(_global_config)
-    _global_auth = APIKeyAuth(_global_config)
+    if config is not None:
+        _global_config = config
+        _global_auth = APIKeyAuth(config)
+    elif _global_config is None:
+        _global_config = load_config("config.yaml")
+        _global_auth = APIKeyAuth(_global_config)
+
+    if recorder is not None:
+        _global_recorder = recorder
 
 
 def get_config() -> AppConfig:
@@ -32,7 +54,15 @@ def get_config() -> AppConfig:
 def get_recorder() -> RoadRecorder:
     global _global_recorder
     if _global_recorder is None:
-        init_dependencies()
+        raise RuntimeError(
+            "RoadRecorder is not initialized. Storage gate must verify USB drive before constructing the recorder."
+        )
+    return _global_recorder
+
+
+def get_optional_recorder() -> Optional[RoadRecorder]:
+    """Retrieve active recorder without raising if not yet initialized."""
+    global _global_recorder
     return _global_recorder
 
 

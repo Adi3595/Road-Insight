@@ -16,18 +16,17 @@ class DeviceStatusResponse(BaseModel):
 
 
 class RecordingStartRequest(BaseModel):
-    duration_seconds: Optional[int] = Field(
-        None,
+    duration_seconds: int = Field(
+        ...,
         ge=5,
-        le=3600,
-        description="Duration of recording in seconds. If null, records continuously until stopped."
+        description="Explicit duration of recording in seconds. Bounded between 5s and configured maximum limit."
     )
 
 
 class RecordingStartResponse(BaseModel):
     session_id: str = Field(..., description="Unique recording session identifier")
     status: str = Field(..., description="Status of the session (e.g. recording)")
-    requested_duration_seconds: Optional[int] = Field(None, description="Requested duration or null for continuous")
+    requested_duration_seconds: int = Field(..., description="Requested bounded duration in seconds")
 
 
 class RecordingStopResponse(BaseModel):

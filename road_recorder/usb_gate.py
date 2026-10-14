@@ -30,12 +30,13 @@ def verify_usb_gate(config: AppConfig) -> Tuple[bool, str, Dict[str, Any]]:
     mount_path = config.mount_path
     expected_uuid = config.volume_uuid
 
-    # Run core hardware storage check
+    # Run comprehensive hardware storage check including marker validation and write probe
     verif = verify_usb_mount_safety(
         mount_path_str=str(mount_path),
         expected_uuid=expected_uuid if expected_uuid else None,
         require_verified_usb=config.require_verified_usb,
         allow_fallback_to_sd=config.allow_fallback_to_sd,
+        run_write_probe=True,
     )
 
     if not verif["safe_to_start"]:
@@ -43,16 +44,7 @@ def verify_usb_gate(config: AppConfig) -> Tuple[bool, str, Dict[str, Any]]:
         msg = f"USB storage verification failed: {reasons}"
         return False, msg, verif
 
-    # Check project directory and volume marker
-    marker_info = check_volume_marker(mount_path)
-    if not marker_info["exists"] or not marker_info["valid"]:
-        msg = (
-            f"Volume marker '{VOLUME_MARKER_FILENAME}' is missing or invalid on {mount_path}. "
-            "Drive does not appear to be an initialized Road Recorder volume."
-        )
-        return False, msg, verif
-
-    return True, "USB volume (70AA-2D80) verified, mounted, and writable.", verif
+    return True, f"USB volume ({expected_uuid or 'verified'}) verified, mounted, and writable.", verif
 
 
 def main():

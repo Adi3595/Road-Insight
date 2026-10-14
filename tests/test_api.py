@@ -278,6 +278,14 @@ def test_list_recordings_and_metadata(tmp_path: Path):
         )
         assert res_meta.status_code == 200
         assert res_meta.json()["recording_id"] == "RR_20261013_210000_001"
+
+        # Date filter validation: strictly YYYY-MM-DD
+        res_date_ok = client.get("/api/v1/recordings?date=2026-10-13", headers={"X-API-Key": TEST_API_KEY})
+        assert res_date_ok.status_code == 200
+
+        res_date_bad = client.get("/api/v1/recordings?date=13-10-2026", headers={"X-API-Key": TEST_API_KEY})
+        assert res_date_bad.status_code == 400
+        assert "strictly YYYY-MM-DD" in res_date_bad.json()["detail"]
     finally:
         recorder.stop()
         close_logger_handlers()
@@ -301,7 +309,7 @@ def test_download_video_and_range_requests(tmp_path: Path):
             "finalization_status": "finalized"
         })
 
-        # Full download (HTTP 200)
+        # Full download (HTTP 200) - MUST NOT have Content-Range header
         res_full = client.get(
             "/api/v1/recordings/RR_20261013_220000_001/video",
             headers={"X-API-Key": TEST_API_KEY}
@@ -309,31 +317,72 @@ def test_download_video_and_range_requests(tmp_path: Path):
         assert res_full.status_code == 200
         assert res_full.content == dummy_content
         assert res_full.headers["Content-Type"] == "video/mp4"
+        assert "Content-Range" not in res_full.headers, "RFC 7233: 200 OK must not have Content-Range!"
 
-        # Range request (HTTP 206)
+        # Range request (HTTP 206) - closed range
         res_range = client.get(
             "/api/v1/recordings/RR_20261013_220000_001/video",
             headers={"X-API-Key": TEST_API_KEY, "Range": "bytes=0-7"}
         )
         assert res_range.status_code == 206
         assert res_range.content == b"ftypisom"
-        assert "Content-Range" in res_range.headers
+        assert res_range.headers.get("Content-Range") == f"bytes 0-7/{len(dummy_content)}"
+
+        # Suffix range request (HTTP 206) - last 10 bytes
+        res_suffix = client.get(
+            "/api/v1/recordings/RR_20261013_220000_001/video",
+            headers={"X-API-Key": TEST_API_KEY, "Range": "bytes=-10"}
+        )
+        assert res_suffix.status_code == 206
+        assert len(res_suffix.content) == 10
+        assert res_suffix.content == dummy_content[-10:]
+
+        # Unsatisfiable range (HTTP 416)
+        res_416 = client.get(
+            "/api/v1/recordings/RR_20261013_220000_001/video",
+            headers={"X-API-Key": TEST_API_KEY, "Range": "bytes=99999-100000"}
+        )
+        assert res_416.status_code == 416
+        assert "Content-Range" in res_416.headers
+        assert res_416.headers["Content-Range"] == f"bytes */{len(dummy_content)}"
+
+        # Multiple ranges rejected (HTTP 416)
+        res_multi = client.get(
+            "/api/v1/recordings/RR_20261013_220000_001/video",
+            headers={"X-API-Key": TEST_API_KEY, "Range": "bytes=0-10,20-30"}
+        )
+        assert res_multi.status_code == 416
     finally:
         recorder.stop()
         close_logger_handlers()
 
 
-def test_download_nonexistent_and_path_traversal(tmp_path: Path):
-    client, recorder, _, _ = create_test_setup(tmp_path)
+def test_download_rejects_unfinalized_and_traversal(tmp_path: Path):
+    client, recorder, config, mount_dir = create_test_setup(tmp_path)
     try:
-        # Nonexistent recording ID
-        res_404 = client.get(
-            "/api/v1/recordings/nonexistent_id/video",
+        # Create unfinalized record
+        date_dir = config.recordings_path / "2026-10-13"
+        date_dir.mkdir(parents=True, exist_ok=True)
+        unfinalized_file = date_dir / "RR_unfinalized.mp4"
+        unfinalized_file.write_bytes(b"temp")
+
+        recorder.index_mgr.append_segment({
+            "recording_id": "RR_unfinalized",
+            "relative_path": "2026-10-13/RR_unfinalized.mp4",
+            "start_timestamp": "2026-10-13T22:00:00",
+            "file_size_bytes": 4,
+            "finalization_status": "in_progress"  # NOT finalized!
+        })
+
+        # Request unfinalized recording -> 400 Bad Request
+        res_unfin = client.get(
+            "/api/v1/recordings/RR_unfinalized/video",
             headers={"X-API-Key": TEST_API_KEY}
         )
-        assert res_404.status_code == 404
+        assert res_unfin.status_code == 400
+        assert "not finalized" in res_unfin.json()["detail"]
 
-        # Path traversal attack in recording ID
+        # Path traversal attack
         res_attack = client.get(
             "/api/v1/recordings/..%2F..%2Fetc%2Fpasswd/video",
             headers={"X-API-Key": TEST_API_KEY}
@@ -344,29 +393,122 @@ def test_download_nonexistent_and_path_traversal(tmp_path: Path):
         close_logger_handlers()
 
 
-def test_live_stream_session_endpoints(tmp_path: Path):
+def test_live_stream_endpoints_return_501_not_implemented(tmp_path: Path):
+    """Ensure live stream endpoints accurately report unsupported / 501 Not Implemented."""
     client, recorder, _, _ = create_test_setup(tmp_path)
     try:
         # Stream status
         res_stat = client.get("/api/v1/stream/status", headers={"X-API-Key": TEST_API_KEY})
         assert res_stat.status_code == 200
-        assert res_stat.json()["stream_active"] is False
+        data_stat = res_stat.json()
+        assert data_stat["stream_supported"] is False
+        assert data_stat["stream_active"] is False
+        assert "not implemented" in data_stat["message"].lower()
 
-        # Start stream session
+        # Start stream session -> 501 Not Implemented
         res_start = client.post(
             "/api/v1/stream/start",
             headers={"X-API-Key": TEST_API_KEY},
             json={"protocol": "rtsp", "duration_seconds": 60}
         )
-        assert res_start.status_code == 200
-        data = res_start.json()
-        assert data["status"] == "active"
-        stream_id = data["stream_id"]
+        assert res_start.status_code == 501
+        assert "not implemented" in res_start.json()["detail"].lower()
 
-        # Stop stream session
+        # Stop stream session -> 501 Not Implemented
         res_stop = client.post("/api/v1/stream/stop", headers={"X-API-Key": TEST_API_KEY})
-        assert res_stop.status_code == 200
-        assert res_stop.json()["status"] == "stopped"
+        assert res_stop.status_code == 501
+        assert "not implemented" in res_stop.json()["detail"].lower()
     finally:
         recorder.stop()
         close_logger_handlers()
+
+
+def test_key_generation_fails_without_verified_usb(tmp_path: Path):
+    """Safeguard: Generating or saving API key must fail if USB is not verified."""
+    from road_recorder.api.auth import generate_and_save_api_key
+
+    unmounted_mount = tmp_path / "unmounted_usb"
+    bad_config = AppConfig({
+        "storage": {
+            "mount_path": str(unmounted_mount),
+            "require_verified_usb": True,
+            "volume_uuid": "70AA-2D80"
+        }
+    })
+
+    try:
+        generate_and_save_api_key(unmounted_mount / ".road-recorder-api.key", config=bad_config)
+        assert False, "Should raise RuntimeError when USB is unverified"
+    except RuntimeError as e:
+        assert "USB storage is not verified" in str(e)
+    assert not unmounted_mount.exists(), "Must not create directory on unverified root path"
+
+
+def test_key_generation_policy_and_persistence(tmp_path: Path):
+    """Safeguard: Rejects key file outside mount, and verifies persistence on valid mount."""
+    from road_recorder.api.auth import generate_and_save_api_key
+
+    fake_mount = tmp_path / "mnt_usb"
+    fake_mount.mkdir()
+
+    cfg = AppConfig({
+        "storage": {
+            "mount_path": str(fake_mount),
+            "require_verified_usb": False,  # Allow in test environment
+        }
+    })
+
+    # 1. Reject key file outside mount path (e.g. attempting to write to /tmp or root)
+    outside_file = tmp_path / "outside.key"
+    try:
+        generate_and_save_api_key(outside_file, config=cfg)
+        assert False, "Should reject key file outside config.mount_path"
+    except RuntimeError as e:
+        assert "must reside within the verified USB storage" in str(e)
+
+    # 2. Valid key file inside mount path persists and matches
+    valid_key_file = fake_mount / ".road-recorder-api.key"
+    key = generate_and_save_api_key(valid_key_file, config=cfg)
+    assert valid_key_file.exists()
+    assert valid_key_file.read_text(encoding="utf-8").strip() == key
+    assert len(key) >= 32
+
+
+
+def test_startup_aborts_and_prevents_recorder_construction_when_usb_unverified(tmp_path: Path):
+    """
+    Safeguard: API startup lifespan aborts immediately when USB verification fails,
+    preventing RoadRecorder construction and startup side-effects.
+    """
+    from road_recorder.api.dependencies import set_recorder, get_optional_recorder
+    from api_server import create_app
+
+    unmounted_mount = tmp_path / "absent_usb_drive"
+    bad_config = AppConfig({
+        "camera": {"backend": "mock"},
+        "storage": {
+            "mount_path": str(unmounted_mount),
+            "require_verified_usb": True,
+            "volume_uuid": "70AA-2D80"
+        },
+        "api": {
+            "api_key_file": str(unmounted_mount / ".road-recorder-api.key")
+        }
+    })
+
+    set_recorder(None)
+    app = create_app(config=bad_config)
+
+    # Lifespan should raise RuntimeError on startup
+    startup_aborted = False
+    try:
+        with TestClient(app) as test_client:
+            pass
+    except RuntimeError as e:
+        startup_aborted = True
+        assert "Road Recorder API startup aborted" in str(e)
+
+    assert startup_aborted is True, "Lifespan startup must abort when USB is unverified!"
+    assert get_optional_recorder() is None, "RoadRecorder must not be constructed when startup aborts!"
+    assert not unmounted_mount.exists(), "Target directory must not be created on absent USB path!"
+

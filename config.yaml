@@ -53,6 +53,5 @@ api:
   api_key_file: "/mnt/road-recorder-usb/.road-recorder-api.key"
   # Maximum allowable recording duration for a single requested session (seconds)
   max_duration_seconds: 3600
-  # Enable CORS for frontend consumers
-  cors_origins:
-    - "*"
+  # CORS origins: empty list by default (no cross-origin access). Add trusted origins explicitly (e.g. "http://localhost:3000")
+  cors_origins: []

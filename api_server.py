@@ -24,7 +24,7 @@ from road_recorder.config import load_config, AppConfig
 from road_recorder.recorder import RoadRecorder
 from road_recorder.usb_gate import verify_usb_gate
 from road_recorder.logging_setup import close_logger_handlers
-from road_recorder.api.dependencies import init_dependencies, get_recorder, get_config
+from road_recorder.api.dependencies import init_dependencies, get_recorder, get_optional_recorder, set_recorder, get_config
 from road_recorder.api.auth import get_configured_api_key, generate_and_save_api_key
 from road_recorder.api.routes import device, recordings, stream
 
@@ -33,34 +33,46 @@ from road_recorder.api.routes import device, recordings, stream
 async def lifespan(app: FastAPI):
     """
     Application lifespan manager.
-    Validates USB storage before serving traffic and performs graceful shutdown on exit.
+    Enforces strict startup ordering:
+    1. Validates configuration.
+    2. Runs USB pre-flight gate. ABORTS startup immediately if USB is missing or unverified.
+    3. Confirms or generates API key on verified USB storage.
+    4. Constructs RoadRecorder and persistent file logging only after USB gate passes.
+    5. Safely tears down resources on shutdown.
     """
     config = get_config()
-    recorder = get_recorder()
 
-    # Pre-flight USB gate check
+    # 1. Pre-flight USB gate check BEFORE constructing recorder or opening log files
     is_valid, msg, details = verify_usb_gate(config)
     if not is_valid:
-        recorder.logger.warning(
-            f"[STARTUP NOTICE] USB pre-flight gate check: {msg}. "
-            "Recording endpoints will reject requests until verified USB drive is mounted."
-        )
-    else:
-        recorder.logger.info(f"[STARTUP] {msg}")
+        print(f"[FATAL STARTUP ERROR] USB gate verification failed: {msg}", file=sys.stderr)
+        raise RuntimeError(f"Road Recorder API startup aborted: {msg}")
 
-    # Ensure API Key exists or log instructions
+    print(f"[STARTUP] USB storage verified: {msg}")
+
+    # 2. Ensure API Key exists on verified USB drive
     api_key = get_configured_api_key(config)
     if not api_key:
-        new_key = generate_and_save_api_key(config.api_key_file)
-        recorder.logger.info(f"[API KEY] Initialized new API key at {config.api_key_file}")
+        new_key = generate_and_save_api_key(config.api_key_file, config=config)
+        print(f"[API KEY] Initialized new API key at {config.api_key_file}")
     else:
-        recorder.logger.info("[API KEY] Verified active API key configuration.")
+        print("[API KEY] Verified active API key configuration.")
+
+    # 3. Construct RoadRecorder singleton only after USB gate passes (if not injected via tests)
+    recorder = get_optional_recorder()
+    if recorder is None:
+        recorder = RoadRecorder(config)
+        set_recorder(recorder)
+
+    recorder.logger.info("[STARTUP] Road Recorder API initialized and ready.")
 
     yield
 
     # Shutdown sequence
-    recorder.logger.info("[SHUTDOWN] Terminating Road Recorder API...")
-    recorder.stop()
+    active_rec = get_optional_recorder()
+    if active_rec is not None:
+        active_rec.logger.info("[SHUTDOWN] Terminating Road Recorder API...")
+        active_rec.stop()
     close_logger_handlers()
 
 
@@ -74,22 +86,25 @@ def create_app(config: Optional[AppConfig] = None, recorder: Optional[RoadRecord
         version="1.0.0",
         description=(
             "Authenticated Video Data Provider for Raspberry Pi 4 Road Inspection Dashcam. "
-            "Delivers segmented MP4 video files, metadata, and hardware telemetry for external computer vision pipelines."
+            "Delivers segmented MP4 video files, metadata, and hardware telemetry for external computer vision pipelines. "
+            "Intended for trusted LAN/VPN environments only."
         ),
         lifespan=lifespan,
         docs_url="/docs",
         redoc_url="/redoc"
     )
 
-    # CORS configuration
-    origins = cfg.cors_origins if hasattr(cfg, "cors_origins") else ["*"]
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # CORS configuration - default to no cross-origin; never combine wildcard with credentials
+    origins = cfg.cors_origins if hasattr(cfg, "cors_origins") and cfg.cors_origins else []
+    if origins:
+        has_wildcard = "*" in origins
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=not has_wildcard,  # Wildcard cannot combine with credentials per CORS standard
+            allow_methods=["GET", "POST", "HEAD", "OPTIONS"],
+            allow_headers=["*"],
+        )
 
     # Mount API routes
     app.include_router(device.router)

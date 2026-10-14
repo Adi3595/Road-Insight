@@ -12,33 +12,50 @@ from road_recorder.api.schemas import DeviceStatusResponse
 router = APIRouter(prefix="/api/v1", tags=["Device & Health"])
 
 
-@router.get("/health", summary="Lightweight health check")
+@router.get("/health", summary="Process liveness and storage readiness check")
 def health_check(
-    recorder: RoadRecorder = Depends(get_recorder),
     config: AppConfig = Depends(get_config)
 ):
     """
-    Lightweight health check for monitoring and load balancers.
-    Fails safely with HTTP 503 if the required USB drive is missing.
+    Health check distinguishing process liveness from verified storage readiness.
+    Process liveness reports that the service is running.
+    Storage readiness reports whether the required USB volume is verified and ready for recording.
     """
-    metrics = recorder.storage_mgr.get_storage_metrics()
-    is_usb_ready = metrics.get("safe_to_record", False)
+    from road_recorder.api.dependencies import get_optional_recorder
+    from hardware.storage.storage_check import verify_usb_mount_safety
 
-    if not is_usb_ready:
+    recorder = get_optional_recorder()
+    rec_state = recorder.state if recorder is not None else "NOT_INITIALIZED"
+
+    verif = verify_usb_mount_safety(
+        mount_path_str=str(config.mount_path),
+        expected_uuid=config.volume_uuid or None,
+        require_verified_usb=config.require_verified_usb,
+        allow_fallback_to_sd=config.allow_fallback_to_sd,
+        run_write_probe=False
+    )
+    storage_ready = verif["safe_to_start"]
+
+    if not storage_ready:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
                 "status": "degraded",
+                "process_alive": True,
+                "storage_verified": False,
                 "usb_ready": False,
-                "message": metrics.get("rejection_message") or "USB drive is unavailable.",
-                "reasons": metrics.get("reasons_blocked", [])
+                "recording_state": rec_state,
+                "message": verif.get("rejection_message") or "USB drive is unavailable.",
+                "reasons": verif.get("reasons_blocked", [])
             }
         )
 
     return {
         "status": "healthy",
+        "process_alive": True,
+        "storage_verified": True,
         "usb_ready": True,
-        "recording_state": recorder.state,
+        "recording_state": rec_state,
         "mount_path": str(config.mount_path)
     }
 

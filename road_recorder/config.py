@@ -42,7 +42,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "api_key_env_var": "ROAD_RECORDER_API_KEY",
         "api_key_file": "/mnt/road-recorder-usb/.road-recorder-api.key",
         "max_duration_seconds": 3600,
-        "cors_origins": ["*"],
+        "cors_origins": [],
     },
     "logging": {
         "level": "INFO",
@@ -145,15 +145,30 @@ class AppConfig:
         auto_start = self.recording.get("auto_start", self.recording.get("auto_start_on_launch", False))
         self.auto_start = bool(auto_start)
 
-        # API settings
-        self.api = raw.get("api", {})
-        self.api_host = str(self.api.get("host", "0.0.0.0"))
-        self.api_port = int(self.api.get("port", 8000))
-        self.api_key_env_var = str(self.api.get("api_key_env_var", "ROAD_RECORDER_API_KEY"))
+        # API settings (preserve all explicit and custom API fields)
+        self.api = dict(raw.get("api", {}))
+        self.api_host = str(self.api.get("host", "0.0.0.0")).strip()
+        try:
+            self.api_port = int(self.api.get("port", 8000))
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Invalid API port '{self.api.get('port')}': must be an integer.") from e
+
+        self.api_key_env_var = str(self.api.get("api_key_env_var", "ROAD_RECORDER_API_KEY")).strip()
         raw_key_file = str(self.api.get("api_key_file", "/mnt/road-recorder-usb/.road-recorder-api.key"))
         self.api_key_file = Path(os.path.expanduser(raw_key_file)).resolve()
-        self.max_duration_seconds = int(self.api.get("max_duration_seconds", 3600))
-        self.cors_origins = list(self.api.get("cors_origins", ["*"]))
+
+        try:
+            self.max_duration_seconds = int(self.api.get("max_duration_seconds", 3600))
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Invalid max_duration_seconds '{self.api.get('max_duration_seconds')}': must be an integer.") from e
+
+        raw_origins = self.api.get("cors_origins", [])
+        if isinstance(raw_origins, (list, tuple)):
+            self.cors_origins = [str(o).strip() for o in raw_origins]
+        elif isinstance(raw_origins, str):
+            self.cors_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
+        else:
+            self.cors_origins = []
 
         # Logging settings
         self.log_level = str(self.logging.get("level", "INFO")).upper()
@@ -175,8 +190,16 @@ class AppConfig:
         if self.segment_duration_seconds < 5:
             raise ValueError(f"Segment duration {self.segment_duration_seconds}s is too short (minimum 5s).")
 
-        if self.max_duration_seconds < 5:
-            raise ValueError(f"max_duration_seconds {self.max_duration_seconds}s is too short (minimum 5s).")
+        if not (1 <= self.api_port <= 65535):
+            raise ValueError(f"Invalid API port {self.api_port}. Port must be between 1 and 65535.")
+
+        if self.max_duration_seconds < 5 or self.max_duration_seconds > 86400:
+            raise ValueError(
+                f"Invalid max_duration_seconds {self.max_duration_seconds}s. Must be between 5s and 86400s (24h)."
+            )
+
+        if not isinstance(self.cors_origins, list):
+            raise ValueError("cors_origins must be a list of allowed origin strings.")
 
         if self.critical_free_space_mb <= 0:
             raise ValueError("Critical storage threshold must be greater than 0 MB.")
@@ -204,12 +227,18 @@ def load_config(config_path: str = "config.yaml") -> AppConfig:
         except Exception as e:
             print(f"[WARN] Failed reading config file at {cfg_file}: {e}. Falling back to defaults.")
 
-    # Deep merge with defaults
+    # Deep merge with defaults, preserving all custom sections and keys in loaded_data
     merged: Dict[str, Any] = {}
     for section, sec_defaults in DEFAULT_CONFIG.items():
-        merged[section] = {}
+        merged[section] = dict(sec_defaults)
         sec_loaded = loaded_data.get(section, {}) if isinstance(loaded_data, dict) else {}
-        for k, def_v in sec_defaults.items():
-            merged[section][k] = sec_loaded.get(k, def_v)
+        if isinstance(sec_loaded, dict):
+            merged[section].update(sec_loaded)
+
+    # Also preserve any top-level sections in loaded_data that aren't in DEFAULT_CONFIG
+    if isinstance(loaded_data, dict):
+        for section, sec_data in loaded_data.items():
+            if section not in merged:
+                merged[section] = sec_data
 
     return AppConfig(merged)

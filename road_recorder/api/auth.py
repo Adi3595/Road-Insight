@@ -40,23 +40,64 @@ def get_configured_api_key(config: AppConfig) -> Optional[str]:
     return None
 
 
-def generate_and_save_api_key(key_file_path: Path) -> str:
+def generate_and_save_api_key(key_file_path: Path, config: Optional[AppConfig] = None) -> str:
     """
     Generate a cryptographically secure 256-bit API key and save it to file with restricted permissions.
+    Fails closed if the USB drive is not verified, path is not within USB storage, or persistence fails.
+    Never returns an unsaved key.
     """
+    if config is not None:
+        from hardware.storage.storage_check import verify_usb_mount_safety
+        verif = verify_usb_mount_safety(
+            mount_path_str=str(config.mount_path),
+            expected_uuid=config.volume_uuid or None,
+            require_verified_usb=config.require_verified_usb,
+            allow_fallback_to_sd=config.allow_fallback_to_sd,
+            run_write_probe=False
+        )
+        if not verif["safe_to_start"]:
+            reasons = "; ".join(verif.get("reasons_blocked", []))
+            raise RuntimeError(f"Cannot generate/save API key: USB storage is not verified or mounted. {reasons}")
+
+        try:
+            key_file_path.resolve().relative_to(config.mount_path.resolve())
+        except ValueError:
+            raise RuntimeError(
+                f"Configured api_key_file '{key_file_path}' must reside within the verified USB storage '{config.mount_path}'."
+            )
+
     new_key = secrets.token_urlsafe(32)
+
     try:
         key_file_path.parent.mkdir(parents=True, exist_ok=True)
-        key_file_path.write_text(new_key + "\n", encoding="utf-8")
-        # Restrict permissions on POSIX systems to owner read/write only (600)
+        # Write with restrictive permissions (0600 on POSIX)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        mode = 0o600
+        fd = os.open(str(key_file_path), flags, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(new_key + "\n")
+
         try:
             os.chmod(str(key_file_path), 0o600)
         except Exception:
             pass
+
+        # Verify persistence immediately
+        read_back = key_file_path.read_text(encoding="utf-8").strip()
+        if read_back != new_key:
+            raise RuntimeError("Persistence verification failed: read-back key did not match generated key.")
+
         logger.info(f"Generated new API key saved to {key_file_path}")
+        return new_key
     except Exception as e:
-        logger.warning(f"Could not persist API key to file {key_file_path}: {e}")
-    return new_key
+        logger.error(f"Failed to persist API key to file {key_file_path}: {e}")
+        # Clean up incomplete key file if present
+        if key_file_path.exists():
+            try:
+                key_file_path.unlink()
+            except Exception:
+                pass
+        raise RuntimeError(f"Could not persist API key to {key_file_path}: {e}") from e
 
 
 class APIKeyAuth:

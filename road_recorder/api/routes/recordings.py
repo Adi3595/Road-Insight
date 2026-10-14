@@ -45,32 +45,95 @@ def create_range_streaming_response(
     chunk_size: int = 65536
 ) -> StreamingResponse:
     """
-    Stream a video file with HTTP Range (206 Partial Content) support.
+    Stream a video file with RFC 7233 HTTP Range (206 Partial Content) support.
     Streams directly from disk in small 64 KB chunks; never loads entire file into RAM.
+    Does NOT emit Content-Range header for normal 200 OK full responses.
     """
     file_size = file_path.stat().st_size
-    start = 0
-    end = file_size - 1
 
-    if range_header and range_header.startswith("bytes="):
-        range_str = range_header.replace("bytes=", "").strip()
-        parts = range_str.split("-")
-        try:
-            if parts[0]:
-                start = int(parts[0])
-            if len(parts) > 1 and parts[1]:
-                end = int(parts[1])
-        except ValueError:
-            pass
+    # Case 1: Normal full file response (200 OK) - MUST NOT include Content-Range
+    if not range_header or not range_header.strip():
+        def full_generator():
+            with open(file_path, "rb") as f:
+                while True:
+                    data = f.read(chunk_size)
+                    if not data:
+                        break
+                    yield data
 
-    start = max(0, start)
-    end = min(file_size - 1, end)
-    if start > end:
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+            "Content-Type": content_type,
+            "Content-Disposition": f'inline; filename="{file_path.name}"'
+        }
+        return StreamingResponse(full_generator(), status_code=status.HTTP_200_OK, headers=headers)
+
+    # Case 2: Range request processing
+    raw_range = range_header.strip()
+    if not raw_range.startswith("bytes="):
         raise HTTPException(
             status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
-            detail="Requested range out of bounds."
+            detail="Unsupported range unit.",
+            headers={"Content-Range": f"bytes */{file_size}"}
         )
 
+    range_spec = raw_range[len("bytes="):].strip()
+
+    # Reject multiple ranges (not supported)
+    if "," in range_spec:
+        raise HTTPException(
+            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+            detail="Multiple byte ranges are not supported.",
+            headers={"Content-Range": f"bytes */{file_size}"}
+        )
+
+    # Match range pattern: "<start>-<end>", "<start>-", or "-<suffix>"
+    match = re.match(r"^(\d*)-(\d*)$", range_spec)
+    if not match:
+        raise HTTPException(
+            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+            detail="Malformed Range header syntax.",
+            headers={"Content-Range": f"bytes */{file_size}"}
+        )
+
+    raw_start, raw_end = match.groups()
+    if not raw_start and not raw_end:
+        raise HTTPException(
+            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+            detail="Invalid empty range specifier.",
+            headers={"Content-Range": f"bytes */{file_size}"}
+        )
+
+    if not raw_start:
+        # Suffix range: -<suffix>
+        suffix_len = int(raw_end)
+        if suffix_len <= 0 or file_size == 0:
+            raise HTTPException(
+                status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+                detail="Suffix length out of bounds.",
+                headers={"Content-Range": f"bytes */{file_size}"}
+            )
+        start = max(0, file_size - suffix_len)
+        end = file_size - 1
+    elif not raw_end:
+        # Open-ended range: <start>-
+        start = int(raw_start)
+        end = file_size - 1
+    else:
+        # Closed range: <start>-<end>
+        start = int(raw_start)
+        end = int(raw_end)
+
+    # Bounds validation
+    if file_size == 0 or start >= file_size or start > end:
+        raise HTTPException(
+            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+            detail="Requested range not satisfiable.",
+            headers={"Content-Range": f"bytes */{file_size}"}
+        )
+
+    end = min(file_size - 1, end)
     content_length = end - start + 1
 
     def chunk_generator():
@@ -85,7 +148,6 @@ def create_range_streaming_response(
                 remaining -= len(data)
                 yield data
 
-    status_code = status.HTTP_206_PARTIAL_CONTENT if range_header else status.HTTP_200_OK
     headers = {
         "Content-Range": f"bytes {start}-{end}/{file_size}",
         "Accept-Ranges": "bytes",
@@ -93,10 +155,10 @@ def create_range_streaming_response(
         "Content-Type": content_type,
         "Content-Disposition": f'inline; filename="{file_path.name}"'
     }
-    return StreamingResponse(chunk_generator(), status_code=status_code, headers=headers)
+    return StreamingResponse(chunk_generator(), status_code=status.HTTP_206_PARTIAL_CONTENT, headers=headers)
 
 
-@router.post("/start", response_model=RecordingStartResponse, summary="Start a recording session")
+@router.post("/start", response_model=RecordingStartResponse, summary="Start a bounded recording session")
 def start_recording(
     req: RecordingStartRequest,
     recorder: RoadRecorder = Depends(get_recorder),
@@ -104,9 +166,10 @@ def start_recording(
     _auth: str = Depends(verify_api_key)
 ):
     """
-    Start a recording session for a requested duration or continuous recording (null).
+    Start a recording session with an explicit bounded duration in seconds.
+    Rejects missing, non-integer, below-minimum (<5s), or above-maximum durations.
     Rejects concurrent sessions with 409 Conflict.
-    Rejects unmounted or missing USB storage with 503.
+    Rejects unmounted or unverified USB storage with 503.
     """
     # 1. Check if already recording
     if recorder.state in ["RECORDING", "STARTING", "ROTATING"]:
@@ -123,14 +186,25 @@ def start_recording(
             detail=metrics.get("rejection_message") or "USB recording drive not available. Recording has not started."
         )
 
-    # 3. Validate duration
+    # 3. Validate explicit bounded duration
     duration = req.duration_seconds
-    if duration is not None:
-        if duration > config.max_duration_seconds:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Requested duration {duration}s exceeds maximum limit of {config.max_duration_seconds}s."
-            )
+    if duration is None or not isinstance(duration, int):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Explicit integer duration_seconds is required."
+        )
+
+    if duration < 5:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Requested duration {duration}s is below minimum allowed limit of 5s."
+        )
+
+    if duration > config.max_duration_seconds:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Requested duration {duration}s exceeds maximum limit of {config.max_duration_seconds}s."
+        )
 
     started, msg, session_id = recorder.start_session(duration_seconds=duration)
     if not started:
@@ -215,9 +289,14 @@ def list_recordings(
     """
     records = recorder.index_mgr.list_records()
 
-    # Optional date filtering
-    if date:
+    # Optional date filtering (strictly YYYY-MM-DD)
+    if date is not None:
         date_clean = date.strip()
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", date_clean):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid date filter format. Must be strictly YYYY-MM-DD (e.g. 2026-10-15)."
+            )
         records = [r for r in records if str(r.get("start_timestamp", "")).startswith(date_clean)]
 
     # Newest recordings first
@@ -272,7 +351,7 @@ def download_recording_video(
     """
     Stream finalized MP4 video file with HTTP Range (206) support.
     Streams directly from USB drive without memory buffering.
-    Strictly prevents path traversal and accessing unindexed files.
+    Strictly prevents unfinalized downloads, path traversal, and symlink escapes.
     """
     validate_safe_identifier(recording_id, "recording_id")
 
@@ -285,6 +364,14 @@ def download_recording_video(
             detail=f"Recording '{recording_id}' not found in recording index."
         )
 
+    # 2. Enforce finalization status
+    final_status = str(matched.get("finalization_status", "")).lower()
+    if final_status != "finalized":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Recording '{recording_id}' is not finalized (status: '{final_status}'). Only finalized recordings may be downloaded."
+        )
+
     rel_path = matched.get("relative_path")
     if not rel_path:
         raise HTTPException(
@@ -292,7 +379,7 @@ def download_recording_video(
             detail=f"Recording '{recording_id}' has no associated output file."
         )
 
-    # 2. Strict path traversal verification
+    # 3. Strict path traversal and symlink escape verification
     base_dir = config.recordings_path.resolve()
     target_file = (base_dir / rel_path).resolve()
 
@@ -302,6 +389,16 @@ def download_recording_video(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Access denied: path traversal attempt detected."
+        )
+
+    real_base = Path(os.path.realpath(str(base_dir)))
+    real_target = Path(os.path.realpath(str(target_file)))
+    try:
+        real_target.relative_to(real_base)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Access denied: symlink escape detected."
         )
 
     if not target_file.is_file():

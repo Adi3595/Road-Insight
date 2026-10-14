@@ -89,3 +89,51 @@ def test_simple_yaml_parser_usb_schema():
     assert parsed["storage"]["allow_fallback_to_sd"] is False
     assert parsed["storage"]["critical_free_space_mb"] == 2048
     assert parsed["storage"]["low_space_warning_percent"] == 20
+
+
+def test_api_config_defaults_and_validation():
+    """Verify default API config attributes, bounds validation, and error messages."""
+    cfg = load_config("non_existent_config.yaml")
+    assert cfg.api_host == "0.0.0.0"
+    assert cfg.api_port == 8000
+    assert cfg.api_key_env_var == "ROAD_RECORDER_API_KEY"
+    assert cfg.api_key_file.name == ".road-recorder-api.key"
+    assert cfg.max_duration_seconds == 3600
+    assert cfg.cors_origins == []
+
+    # Invalid port fails
+    try:
+        AppConfig({"api": {"port": 70000}})
+        assert False, "Port 70000 should raise ValueError"
+    except ValueError as e:
+        assert "Invalid API port" in str(e)
+
+    # Invalid max_duration_seconds fails
+    try:
+        AppConfig({"api": {"max_duration_seconds": 2}})
+        assert False, "max_duration_seconds 2 should raise ValueError"
+    except ValueError as e:
+        assert "Invalid max_duration_seconds" in str(e)
+
+
+def test_deep_merge_preserves_custom_api_settings():
+    """Verify that YAML loading preserves custom and extended API settings without discarding."""
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+        f.write("""
+api:
+  host: 127.0.0.1
+  port: 9000
+  custom_option: custom_value
+  max_duration_seconds: 1800
+""")
+        f_name = f.name
+
+    try:
+        cfg = load_config(f_name)
+        assert cfg.api_host == "127.0.0.1"
+        assert cfg.api_port == 9000
+        assert cfg.max_duration_seconds == 1800
+        assert cfg.api.get("custom_option") == "custom_value", "Custom settings must be preserved"
+    finally:
+        Path(f_name).unlink(missing_ok=True)
